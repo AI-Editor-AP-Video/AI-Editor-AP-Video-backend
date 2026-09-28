@@ -9,6 +9,14 @@ build/
 .vercel/
 *.tsbuildinfo
 
+# Testing & Coverage
+tests/
+__tests__/
+*.test.*
+*.spec.*
+.coverage
+coverage/
+
 # Uploads & Media (ignore media artifacts but keep directory structure)
 uploads/*
 !uploads/.gitkeep
