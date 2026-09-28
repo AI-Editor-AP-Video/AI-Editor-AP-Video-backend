@@ -1,0 +1,338 @@
+// Prisma Schema for Node.js Backend with Better-Auth and PostgreSQL + pgvector
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ==========================================
+// 1. User & Authentication (Better-Auth)
+// ==========================================
+enum Role {
+  ADMIN
+  CHIEF_EDITOR
+  EDITOR
+  REVIEWER
+  VIEWER
+}
+
+model User {
+  id            String              @id @default(cuid())
+  name          String?
+  email         String              @unique
+  emailVerified Boolean             @default(false)
+  image         String?
+  role          Role                @default(EDITOR)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @default(now()) @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+  profile       EditorProfile?
+  decisions     EditorialDecision[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("auth_sessions")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  accountId             String
+  providerId            String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @default(now()) @updatedAt
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("accounts")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@map("verifications")
+}
+
+model EditorProfile {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  preferredLanguage String   @default("hi")
+  autoSnapToShots   Boolean  @default(true)
+  minScoreFilter    Float    @default(0.70)
+  themePreference   String   @default("dark")
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("editor_profiles")
+}
+
+// ==========================================
+// 2. Video Session & Extraction (Phase 1 - Run Once)
+// ==========================================
+enum ExtractionStatus {
+  UPLOAD_PENDING
+  EXTRACTING_MEDIA // Audio, proxy, scene cuts
+  TRANSCRIBING // Faster-Whisper ASR
+  BUILDING_MEMORY // Qwen 1024d embeddings & pgvector
+  LOCKED_AND_INDEXED // Data extraction complete & frozen
+  FAILED
+}
+
+model VideoSession {
+  id                 String           @id
+  title              String
+  description        String?          @db.Text
+  durationSeconds    Float            @default(0.0)
+  extractionStatus   ExtractionStatus @default(UPLOAD_PENDING)
+  extractionProgress Float            @default(0.0)
+  seriesCategory     String? // "Bhagavad Gita", "Upanishads", "Sant Kabir", "Seeker Q&A"
+  recordedDate       DateTime?
+  uploadedAt         DateTime         @default(now())
+  updatedAt          DateTime         @default(now()) @updatedAt
+
+  // S3 Asset Keys
+  masterVideoS3Key String?
+  proxyVideoS3Key  String? // 480p lightweight H.264 proxy
+  audioTrackS3Key  String? // 16kHz mono WAV
+
+  // Phase 1 Relational Data (Frozen once extracted)
+  mediaAssets        MediaAsset[]
+  sceneCuts          SceneCut[]
+  transcriptSegments TranscriptSegment[]
+  semanticChunks     SemanticChunk[]
+  keyframes          Keyframe[]
+
+  // Phase 2 Multiple AI Discovery Runs
+  discoveryRuns  DiscoveryRun[]
+  candidateClips CandidateClip[]
+
+  @@map("sessions")
+}
+
+model MediaAsset {
+  id             String       @id @default(cuid())
+  sessionId      String
+  assetType      String // MASTER_VIDEO, PROXY_480P, AUDIO_16K, KEYFRAME_ZIP, TRANSCRIPT_SRT
+  s3Key          String
+  s3Bucket       String       @default("ap-sessions")
+  fileSizeBytes  BigInt       @default(0)
+  mimeType       String       @default("video/mp4")
+  checksumSha256 String?
+  createdAt      DateTime     @default(now())
+  session        VideoSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("media_assets")
+}
+
+model SceneCut {
+  id              Int          @id @default(autoincrement())
+  sessionId       String
+  sceneIndex      Int          @default(0)
+  startTime       Float
+  endTime         Float
+  durationSeconds Float
+  shotType        String?      @default("MEDIUM") // "WIDE", "MEDIUM", "CLOSE_UP"
+  session         VideoSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, startTime])
+  @@map("scene_cuts")
+}
+
+model Keyframe {
+  id                String       @id @default(cuid())
+  sessionId         String
+  timestamp         Float
+  imageS3Key        String
+  sceneId           Int?
+  ocrDetectedText   String?      @db.Text
+  visualDescription String?      @db.Text
+  speakerInFrame    String? // "Acharya Prashant", "Seeker", "Audience"
+  cameraAngle       String?      @default("CLOSE_UP")
+  createdAt         DateTime     @default(now())
+  session           VideoSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, timestamp])
+  @@map("keyframes")
+}
+
+model TranscriptSegment {
+  id           String       @id @default(cuid())
+  sessionId    String
+  segmentIndex Int          @default(0)
+  startTime    Float
+  endTime      Float
+  speakerName  String       @default("Acharya Prashant") // "Acharya Prashant", "Questioner (Anil)"
+  speakerId    Int          @default(0)
+  textHindi    String       @db.Text
+  textEnglish  String?      @db.Text
+  sentiment    String?      @default("CONTEMPLATIVE") // "DIRECT", "URGENT", "CONTEMPLATIVE", "COMPASSIONATE"
+  energyLevel  Float        @default(0.5)
+  wordsJson    Json?        @default("[]") // Array of word timestamps [{word, start, end, confidence}]
+  session      VideoSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, startTime])
+  @@map("transcript_segments")
+}
+
+model SemanticChunk {
+  id            String                       @id
+  sessionId     String
+  chunkIndex    Int                          @default(0)
+  startTime     Float
+  endTime       Float
+  text          String                       @db.Text
+  dominantTheme String?
+  embedding     Unsupported("vector(1024)")? // Qwen3-Embedding-0.6B
+  session       VideoSession                 @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, startTime])
+  @@map("semantic_chunks")
+}
+
+// ==========================================
+// 3. AI Editorial Discovery Runs (Phase 2 - Run Multiple Times)
+// ==========================================
+enum DiscoveryRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model DiscoveryRun {
+  id              String             @id @default(cuid())
+  sessionId       String
+  mode            String             @default("COMPREHENSIVE") // COMPREHENSIVE, FOCUSED, CUSTOM
+  focusOptions    Json               @default("[\"qa\", \"gita\"]") // ["qa", "gita", "stories", "modern_relevance"]
+  customPrompt    String?            @db.Text
+  status          DiscoveryRunStatus @default(PENDING)
+  progressPercent Float              @default(0.0)
+  candidatesFound Int                @default(0)
+  startedAt       DateTime           @default(now())
+  completedAt     DateTime?
+  logs            Json               @default("[]")
+  session         VideoSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  candidates      CandidateClip[]
+
+  @@map("discovery_runs")
+}
+
+// ==========================================
+// 4. Candidate Clips & Editorial Studio (Phase 3 & 4)
+// ==========================================
+enum CandidateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EDITED
+}
+
+model CandidateClip {
+  id              String          @id
+  sessionId       String
+  discoveryRunId  String?
+  rank            Int             @default(1)
+  startTime       Float
+  endTime         Float
+  durationSeconds Float
+  headline        String
+  subtitleQuote   String?
+  discourseType   String          @default("Q&A") // "Q&A", "Gita / Shloka", "Story / Metaphor", "Argument"
+  detectedBy      Json            @default("[]") // ["WhisperX", "Qwen3-Embedding", "PySceneDetect"]
+  topics          Json            @default("[]")
+
+  // Scoring & Vetoes
+  finalApScore     Float @default(0.0)
+  isVetoed         Boolean @default(false)
+  vetoReason       String?
+  apScoreBreakdown Json? @default("{}") // 7 Rubric scores
+
+  // 8 AI Modules Analysis
+  llmAnalysis        Json? @default("{}") // QA analysis, shloka breakdown, story, argument, emotional tone, audience, format suggestions
+  researchReferences Json? @default("{}") // Trending news, AP archive cross-references
+
+  status    CandidateStatus @default(PENDING)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @default(now()) @updatedAt
+
+  session      VideoSession        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  discoveryRun DiscoveryRun?       @relation(fields: [discoveryRunId], references: [id], onDelete: SetNull)
+  decisions    EditorialDecision[]
+
+  @@index([sessionId, finalApScore])
+  @@map("candidate_clips")
+}
+
+// ==========================================
+// 5. Human Editorial Feedback & Flywheel
+// ==========================================
+enum EditorialAction {
+  ACCEPT
+  REJECT
+  AMEND
+}
+
+model EditorialDecision {
+  id                    String          @id @default(cuid())
+  candidateId           String
+  sessionId             String
+  editorId              String          @default("default_editor")
+  decision              EditorialAction @default(ACCEPT)
+  originalStartTime     Float
+  originalEndTime       Float
+  adjustedStartTime     Float?
+  adjustedEndTime       Float?
+  rejectionReason       String? // "INCOMPLETE_CONTEXT", "PREMISE_CUT_OFF", "LOW_AUDIO_CLARITY", etc.
+  notes                 String?         @db.Text
+  featureVectorSnapshot Json?           @default("{}")
+  createdAt             DateTime        @default(now())
+
+  candidate CandidateClip @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  editor    User?         @relation(fields: [editorId], references: [id], onDelete: SetNull)
+
+  @@index([sessionId, decision])
+  @@map("editorial_decisions")
+}
+
+// ==========================================
+// 6. AP Rubric Rules Configuration
+// ==========================================
+model RubricCriterion {
+  id             String   @id
+  name           String
+  category       String   @default("QUALITY") // "NON_NEGOTIABLE", "QUALITY", "ENGAGEMENT"
+  weight         Float    @default(0.15)
+  minThreshold   Float    @default(0.70)
+  description    String   @db.Text
+  evaluationRule String   @db.Text
+  isVetoTrigger  Boolean  @default(false)
+  updatedAt      DateTime @default(now()) @updatedAt
+
+  @@map("rubric_criteria")
+}
