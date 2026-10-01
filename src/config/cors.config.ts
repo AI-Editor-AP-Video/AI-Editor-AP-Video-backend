@@ -5,10 +5,22 @@ import { env } from "./env.js";
  * Returns allowed origins from FRONTEND_URL environment variable.
  */
 export function getAllowedOrigins(): string[] {
-  if (!env.FRONTEND_URL) return [];
-  return env.FRONTEND_URL.split(",")
-    .map((o) => o.trim().replace(/\/$/, ""))
-    .filter(Boolean);
+  const origins = new Set<string>();
+
+  if (env.FRONTEND_URL) {
+    env.FRONTEND_URL.split(",")
+      .map((o) => o.trim().replace(/\/$/, ""))
+      .filter(Boolean)
+      .forEach((o) => origins.add(o));
+  }
+
+  if (env.NODE_ENV !== "production") {
+    origins.add("http://localhost:3000");
+    origins.add("http://localhost:3001");
+    origins.add("http://127.0.0.1:3000");
+  }
+
+  return Array.from(origins);
 }
 
 /**
