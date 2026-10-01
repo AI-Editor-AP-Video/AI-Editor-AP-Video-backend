@@ -40,8 +40,5 @@ COPY --from=builder /app/dist ./dist
 
 EXPOSE 4000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:4000/api/health || exit 1
-
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["node", "dist/server.js"]
