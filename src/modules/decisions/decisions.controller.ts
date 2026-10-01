@@ -16,4 +16,12 @@ export async function decisionsRoutes(fastify: FastifyInstance) {
     const query = req.query as any;
     return decisionsService.listDecisions(query);
   });
+
+  // Phase 5: Dispatch social media multi-platform publishing job to BullMQ
+  fastify.post("/api/candidates/:id/publish", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const result = await decisionsService.publishCandidate(id, req.body as any);
+    reply.status(202);
+    return result;
+  });
 }

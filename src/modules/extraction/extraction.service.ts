@@ -1,5 +1,5 @@
 import { prisma } from "../../infrastructure/db/prisma.js";
-import { aiServiceClient } from "../../infrastructure/ai-client/ai-service-client.js";
+import { queueService, QUEUE_NAMES } from "../../infrastructure/queue/queue.service.js";
 import { AppError } from "../../middleware/errorHandler.js";
 
 export class ExtractionService {
@@ -31,18 +31,22 @@ export class ExtractionService {
       where: { id: sessionId },
       data: {
         extractionStatus: "EXTRACTING_MEDIA",
-        extractionProgress: 10,
+        extractionProgress: 5,
       },
     });
 
-    // Dispatch to Python AI Microservice
-    const aiResult = await aiServiceClient.triggerExtraction(sessionId, path, session.title);
+    // Enqueue background job to BullMQ extraction queue
+    const queuedJob = await queueService.addJob(
+      QUEUE_NAMES.EXTRACTION,
+      `extract-${sessionId}`,
+      { sessionId, videoPath: path, title: session.title }
+    );
 
     return {
-      status: "DISPATCHED",
+      status: "QUEUED",
       session_id: sessionId,
-      message: "Phase 1 Data Extraction pipeline running asynchronously.",
-      ai_service: aiResult,
+      job_id: queuedJob.jobId,
+      message: "Phase 1 Data Extraction enqueued with BullMQ worker.",
     };
   }
 

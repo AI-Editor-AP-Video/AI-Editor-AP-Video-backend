@@ -1,5 +1,4 @@
-import { Redis } from "ioredis";
-import { env } from "../../config/env.js";
+import { redisManager } from "../redis/redis.client.js";
 
 interface MemoryCacheEntry {
   value: any;
@@ -8,49 +7,15 @@ interface MemoryCacheEntry {
 
 /**
  * Production-Grade Multi-Tier Cache Service
- * Primary: High-speed Redis (Shared across cluster)
- * L1: In-memory LRU fallback & micro-cache for sub-millisecond local reads
+ * L1: In-memory LRU fallback & micro-cache for sub-millisecond local reads (<0.1ms)
+ * L2: High-speed shared Redis (via unified RedisManager)
  */
 export class CacheService {
-  private redis: Redis | null = null;
   private memoryCache = new Map<string, MemoryCacheEntry>();
-  private isRedisConnected = false;
 
   constructor() {
-    this.initRedis();
     // Background garbage collector for expired in-memory cache keys every 60s
     setInterval(() => this.cleanupMemoryCache(), 60000).unref();
-  }
-
-  private initRedis() {
-    try {
-      if (!env.REDIS_URL) return;
-
-      this.redis = new Redis(env.REDIS_URL, {
-        maxRetriesPerRequest: 2,
-        enableReadyCheck: false,
-        lazyConnect: true,
-        retryStrategy: (times) => Math.min(times * 100, 3000),
-      });
-
-      this.redis.connect().then(() => {
-        this.isRedisConnected = true;
-      }).catch((err) => {
-        this.isRedisConnected = false;
-        console.warn("[CacheService] Redis connect warning (falling back to in-memory):", err.message);
-      });
-
-      this.redis.on("error", () => {
-        this.isRedisConnected = false;
-      });
-
-      this.redis.on("connect", () => {
-        this.isRedisConnected = true;
-      });
-    } catch (err: any) {
-      this.isRedisConnected = false;
-      console.warn("[CacheService] Redis initialization warning:", err.message);
-    }
   }
 
   private cleanupMemoryCache() {
@@ -72,19 +37,18 @@ export class CacheService {
       this.memoryCache.delete(key);
     }
 
-    // 2. Check Redis if available
-    if (this.isRedisConnected && this.redis) {
-      try {
-        const raw = await this.redis.get(key);
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          // Populate L1 cache for 10s to avoid repeated Redis roundtrips
-          this.memoryCache.set(key, { value: parsed, expiresAt: Date.now() + 10000 });
-          return parsed as T;
-        }
-      } catch {
-        // Silently fallback to null on Redis network glitch
+    // 2. Check Redis via unified manager
+    try {
+      const redis = redisManager.getClient();
+      const raw = await redis.get(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        // Populate L1 cache for 10s to avoid repeated Redis roundtrips
+        this.memoryCache.set(key, { value: parsed, expiresAt: Date.now() + 10000 });
+        return parsed as T;
       }
+    } catch {
+      // Fallback gracefully
     }
 
     return null;
@@ -96,28 +60,26 @@ export class CacheService {
     this.memoryCache.set(key, { value, expiresAt });
 
     // Set Redis
-    if (this.isRedisConnected && this.redis) {
-      try {
-        const stringified = JSON.stringify(value);
-        if (ttlSeconds > 0) {
-          await this.redis.set(key, stringified, "EX", ttlSeconds);
-        } else {
-          await this.redis.set(key, stringified);
-        }
-      } catch {
-        // Fallback gracefully to memory
+    try {
+      const redis = redisManager.getClient();
+      const stringified = JSON.stringify(value);
+      if (ttlSeconds > 0) {
+        await redis.set(key, stringified, "EX", ttlSeconds);
+      } else {
+        await redis.set(key, stringified);
       }
+    } catch {
+      // Fallback gracefully
     }
   }
 
   async del(key: string): Promise<void> {
     this.memoryCache.delete(key);
-    if (this.isRedisConnected && this.redis) {
-      try {
-        await this.redis.del(key);
-      } catch {
-        // Ignore
-      }
+    try {
+      const redis = redisManager.getClient();
+      await redis.del(key);
+    } catch {
+      // Ignore
     }
   }
 
@@ -131,15 +93,14 @@ export class CacheService {
     }
 
     // Delete matching Redis keys
-    if (this.isRedisConnected && this.redis) {
-      try {
-        const keys = await this.redis.keys(pattern);
-        if (keys.length > 0) {
-          await this.redis.del(...keys);
-        }
-      } catch {
-        // Ignore
+    try {
+      const redis = redisManager.getClient();
+      const keys = await redis.keys(pattern);
+      if (keys.length > 0) {
+        await redis.del(...keys);
       }
+    } catch {
+      // Ignore
     }
   }
 

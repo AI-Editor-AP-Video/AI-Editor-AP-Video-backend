@@ -10,6 +10,11 @@ import {
   ListObjectsV2CommandOutput,
   HeadBucketCommand,
   HeadObjectCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
+  ListPartsCommand,
   _Object,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -20,6 +25,18 @@ export interface PresignedUploadUrlResponse {
   s3Key: string;
   bucket: string;
   expiresInSeconds: number;
+}
+
+export interface InitiateMultipartResponse {
+  uploadId: string;
+  s3Key: string;
+  bucket: string;
+  sessionId: string;
+}
+
+export interface PartUrlItem {
+  partNumber: number;
+  uploadUrl: string;
 }
 
 export class S3StorageService {
@@ -87,6 +104,142 @@ export class S3StorageService {
       bucket: this.bucket,
       expiresInSeconds,
     };
+  }
+
+  /**
+   * Initiates an S3/R2 Multipart Upload session for large files
+   */
+  async initiateMultipartUpload(
+    sessionId: string,
+    filename: string,
+    contentType: string = "video/mp4"
+  ): Promise<InitiateMultipartResponse> {
+    const cleanFilename = filename.replace(/\s+/g, "_").replace(/[^a-zA-Z0-9._-]/g, "");
+    const ext = path.extname(cleanFilename) || ".mp4";
+    const s3Key = `sessions/${sessionId}/master_${Date.now()}${ext}`;
+
+    const command = new CreateMultipartUploadCommand({
+      Bucket: this.bucket,
+      Key: s3Key,
+      ContentType: contentType,
+    });
+
+    const response = await this.client.send(command);
+    if (!response.UploadId) {
+      throw new Error("Failed to initiate multipart upload on storage provider");
+    }
+
+    return {
+      uploadId: response.UploadId,
+      s3Key,
+      bucket: this.bucket,
+      sessionId,
+    };
+  }
+
+  /**
+   * Generates signed PUT URLs for uploading individual parts in parallel
+   */
+  async generatePartUploadUrls(
+    s3Key: string,
+    uploadId: string,
+    partNumbers: number[],
+    expiresInSeconds: number = 3600
+  ): Promise<PartUrlItem[]> {
+    const promises = partNumbers.map(async (partNumber) => {
+      const command = new UploadPartCommand({
+        Bucket: this.bucket,
+        Key: s3Key,
+        UploadId: uploadId,
+        PartNumber: partNumber,
+      });
+
+      const uploadUrl = await getSignedUrl(this.client, command, {
+        expiresIn: expiresInSeconds,
+      });
+
+      return {
+        partNumber,
+        uploadUrl,
+      };
+    });
+
+    return Promise.all(promises);
+  }
+
+  /**
+   * Completes an S3/R2 Multipart Upload by assembling the verified parts
+   */
+  async completeMultipartUpload(
+    s3Key: string,
+    uploadId: string,
+    clientParts?: { PartNumber: number; ETag: string }[]
+  ) {
+    // 1. Fetch authoritative list of uploaded parts and genuine ETags directly from Cloudflare R2 / S3
+    let verifiedParts: { PartNumber: number; ETag: string }[] = [];
+    try {
+      const listCommand = new ListPartsCommand({
+        Bucket: this.bucket,
+        Key: s3Key,
+        UploadId: uploadId,
+      });
+
+      const listRes = await this.client.send(listCommand);
+      if (listRes.Parts && listRes.Parts.length > 0) {
+        verifiedParts = listRes.Parts.map((p) => ({
+          PartNumber: p.PartNumber!,
+          ETag: p.ETag!,
+        }));
+      }
+    } catch (err: any) {
+      console.warn("[S3StorageService] ListParts warning:", err.message);
+    }
+
+    // 2. Fallback to client-provided parts if ListParts was not returned
+    if (verifiedParts.length === 0 && clientParts && clientParts.length > 0) {
+      verifiedParts = clientParts.map((p) => ({
+        PartNumber: p.PartNumber,
+        ETag: p.ETag.startsWith('"') ? p.ETag : `"${p.ETag}"`,
+      }));
+    }
+
+    if (verifiedParts.length === 0) {
+      throw new Error("No uploaded parts found in storage for this upload session");
+    }
+
+    // S3 requires parts to be strictly sorted by PartNumber ascending
+    const sortedParts = [...verifiedParts].sort((a, b) => a.PartNumber - b.PartNumber);
+
+    const command = new CompleteMultipartUploadCommand({
+      Bucket: this.bucket,
+      Key: s3Key,
+      UploadId: uploadId,
+      MultipartUpload: {
+        Parts: sortedParts,
+      },
+    });
+
+    const result = await this.client.send(command);
+    return {
+      location: result.Location || s3Key,
+      bucket: result.Bucket || this.bucket,
+      key: result.Key || s3Key,
+      eTag: result.ETag,
+    };
+  }
+
+  /**
+   * Aborts an incomplete multipart upload and frees retained chunk storage
+   */
+  async abortMultipartUpload(s3Key: string, uploadId: string) {
+    const command = new AbortMultipartUploadCommand({
+      Bucket: this.bucket,
+      Key: s3Key,
+      UploadId: uploadId,
+    });
+
+    await this.client.send(command);
+    return { success: true };
   }
 
   /**

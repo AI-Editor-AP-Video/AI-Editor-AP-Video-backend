@@ -21,6 +21,7 @@ import { rubricRoutes } from "./modules/rubric/rubric.controller.js";
 import { decisionsRoutes } from "./modules/decisions/decisions.controller.js";
 import { searchRoutes } from "./modules/search/search.controller.js";
 import { mediaRoutes } from "./modules/media/media.controller.js";
+import { initBackgroundWorkers, shutdownBackgroundWorkers } from "./infrastructure/queue/bootstrap.js";
 
 export async function buildApp() {
   const server = Fastify({
@@ -177,12 +178,24 @@ if (process.env.NODE_ENV !== "test") {
   try {
     const server = await buildApp();
     await server.listen({ port: env.PORT, host: "0.0.0.0" });
-    console.log(`🚀 Production-grade AP Editorial Backend live on http://0.0.0.0:${env.PORT}`);
+    console.log(`🚀 Production-grade AP Editorial API Server live on http://0.0.0.0:${env.PORT}`);
+
+    // Run BullMQ background workers in-process by default (unless explicitly set to false for dedicated worker containers)
+    const runInlineWorkers = process.env.START_WORKERS_INLINE !== "false";
+    if (runInlineWorkers) {
+      console.log("⚡ [Server] Running BullMQ workers in-process (inline mode active)...");
+      initBackgroundWorkers();
+    } else {
+      console.log("ℹ️  [Server] Running in standalone API mode (external worker process expected)");
+    }
 
     const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
     for (const signal of signals) {
       process.on(signal, async () => {
         server.log.info(`Received ${signal}, closing server gracefully...`);
+        if (runInlineWorkers) {
+          await shutdownBackgroundWorkers();
+        }
         await server.close();
         process.exit(0);
       });

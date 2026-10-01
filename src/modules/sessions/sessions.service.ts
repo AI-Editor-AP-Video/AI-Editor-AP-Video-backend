@@ -6,8 +6,17 @@ import { sessionsRepository } from "./sessions.repository.js";
 import { s3Service } from "../../infrastructure/storage/s3.js";
 import { aiServiceClient } from "../../infrastructure/ai-client/ai-service-client.js";
 import { cacheService } from "../../infrastructure/cache/cache.service.js";
+import { queueService, QUEUE_NAMES } from "../../infrastructure/queue/queue.service.js";
 import { AppError } from "../../middleware/errorHandler.js";
-import type { CreateSessionInput, GenerateUploadUrlInput, ListSessionsQuery } from "./sessions.schema.js";
+import type {
+  CreateSessionInput,
+  GenerateUploadUrlInput,
+  ListSessionsQuery,
+  InitiateMultipartInput,
+  GetPartUrlsInput,
+  CompleteMultipartInput,
+  AbortMultipartInput,
+} from "./sessions.schema.js";
 import type { Prisma } from "@prisma/client";
 
 export class SessionsService {
@@ -67,10 +76,24 @@ export class SessionsService {
         console.warn("[SessionsService] Cloudflare R2 master upload warning:", err);
       });
 
-    // Trigger Python AI Microservice Phase 1 Extraction asynchronously in background
-    aiServiceClient.triggerExtraction(sessionId, targetFilePath, title).catch((err) => {
-      console.warn("AI Engine extraction trigger warning (will proceed asynchronously):", err);
-    });
+    // Enqueue Phase 1 Data Extraction into BullMQ dedicated worker queue
+    try {
+      await queueService.addJob(
+        QUEUE_NAMES.EXTRACTION,
+        `extract-${sessionId}`,
+        {
+          sessionId,
+          videoPath: targetFilePath,
+          title,
+        }
+      );
+      console.log(`[SessionsService] Enqueued extraction job for session ${sessionId}`);
+    } catch (queueErr) {
+      console.warn("[SessionsService] Failed to enqueue extraction job via BullMQ, triggering AI client directly:", queueErr);
+      aiServiceClient.triggerExtraction(sessionId, targetFilePath, title).catch((err) => {
+        console.warn("AI Engine extraction trigger warning (will proceed asynchronously):", err);
+      });
+    }
 
     return {
       session: created,
@@ -200,11 +223,25 @@ export class SessionsService {
 
     await cacheService.delByPattern("sessions:list:*");
 
-    // Seamlessly trigger AI microservice extraction asynchronously with Cloudflare R2 key
+    // Enqueue Phase 1 Data Extraction into BullMQ dedicated worker queue
     const extractionTarget = input.videoPath || s3MasterKey;
-    aiServiceClient.triggerExtraction(sessionId, extractionTarget, input.title).catch((err) => {
-      console.warn("[SessionsService] AI extraction trigger warning:", err);
-    });
+    try {
+      await queueService.addJob(
+        QUEUE_NAMES.EXTRACTION,
+        `extract-${sessionId}`,
+        {
+          sessionId,
+          videoPath: extractionTarget,
+          title: input.title.trim(),
+        }
+      );
+      console.log(`[SessionsService] Enqueued extraction job for session ${sessionId}`);
+    } catch (queueErr) {
+      console.warn("[SessionsService] Failed to enqueue extraction job via BullMQ, triggering AI client directly:", queueErr);
+      aiServiceClient.triggerExtraction(sessionId, extractionTarget, input.title.trim()).catch((err) => {
+        console.warn("[SessionsService] Direct AI extraction trigger fallback warning:", err);
+      });
+    }
 
     return created;
   }
@@ -256,6 +293,100 @@ export class SessionsService {
       },
       3600 // 1 hour cache (keyframes are immutable after extraction)
     );
+  }
+
+  async initiateMultipartUpload(input: InitiateMultipartInput) {
+    const sessionId = input.sessionId || `sess_${Date.now()}`;
+    const chunkSizeBytes = input.chunkSizeBytes || 10 * 1024 * 1024;
+    const totalParts = Math.max(1, Math.ceil(input.fileSizeBytes / chunkSizeBytes));
+
+    const initiated = await s3Service.initiateMultipartUpload(
+      sessionId,
+      input.filename,
+      input.contentType || "video/mp4"
+    );
+
+    // Pre-generate part URLs if total parts <= 100 for single round-trip optimization
+    let partUrls: { partNumber: number; uploadUrl: string }[] = [];
+    if (totalParts <= 100) {
+      const partNumbers = Array.from({ length: totalParts }, (_, i) => i + 1);
+      partUrls = await s3Service.generatePartUploadUrls(initiated.s3Key, initiated.uploadId, partNumbers);
+    }
+
+    return {
+      sessionId,
+      uploadId: initiated.uploadId,
+      s3Key: initiated.s3Key,
+      bucket: initiated.bucket,
+      chunkSizeBytes,
+      totalParts,
+      partUrls,
+    };
+  }
+
+  async generatePartUrls(input: GetPartUrlsInput) {
+    const parts = await s3Service.generatePartUploadUrls(input.s3Key, input.uploadId, input.partNumbers);
+    return { parts };
+  }
+
+  async completeMultipartUpload(input: CompleteMultipartInput) {
+    const s3Result = await s3Service.completeMultipartUpload(
+      input.s3Key,
+      input.uploadId,
+      input.parts
+    );
+
+    // Register session in PostgreSQL database
+    const masterVideoUrl = s3Service.getAssetPublicUrl(input.s3Key);
+    const proxyUrl = s3Service.getAssetPublicUrl(`sessions/${input.sessionId}/proxy.mp4`);
+    const audioUrl = s3Service.getAssetPublicUrl(`sessions/${input.sessionId}/audio.wav`);
+
+    const created = await sessionsRepository.create({
+      id: input.sessionId,
+      title: input.title.trim(),
+      description: input.description?.trim() || null,
+      seriesCategory: input.seriesCategory || "Bhagavad Gita",
+      durationSeconds: input.durationSeconds || 0,
+      masterVideoS3Key: masterVideoUrl,
+      proxyVideoS3Key: proxyUrl,
+      audioTrackS3Key: audioUrl,
+      extractionStatus: "EXTRACTING_MEDIA",
+      extractionProgress: 5,
+    });
+
+    await cacheService.delByPattern("sessions:list:*");
+
+    // Enqueue Phase 1 Data Extraction into BullMQ dedicated worker queue
+    try {
+      await queueService.addJob(
+        QUEUE_NAMES.EXTRACTION,
+        `extract-${input.sessionId}`,
+        {
+          sessionId: input.sessionId,
+          videoPath: input.s3Key,
+          title: input.title.trim(),
+        }
+      );
+      console.log(`[SessionsService] Enqueued extraction job for multipart session ${input.sessionId}`);
+    } catch (queueErr) {
+      console.warn("[SessionsService] Failed to enqueue extraction job via BullMQ, triggering AI client directly:", queueErr);
+      aiServiceClient.triggerExtraction(input.sessionId, input.s3Key, input.title.trim()).catch((err) => {
+        console.warn("[SessionsService] Direct AI extraction trigger fallback warning:", err);
+      });
+    }
+
+    return {
+      session: created,
+      uploadStatus: "SUCCESS",
+      sessionId: input.sessionId,
+      s3Key: input.s3Key,
+      location: s3Result.location,
+      masterVideoUrl,
+    };
+  }
+
+  async abortMultipartUpload(input: AbortMultipartInput) {
+    return s3Service.abortMultipartUpload(input.s3Key, input.uploadId);
   }
 
   async updateSession(

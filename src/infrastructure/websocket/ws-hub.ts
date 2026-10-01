@@ -1,10 +1,9 @@
-import { Redis } from "ioredis";
 import type { WebSocket } from "ws";
-import { env } from "../../config/env.js";
+import { redisManager } from "../redis/redis.client.js";
 
 export interface TelemetryEvent {
   sessionId: string;
-  type: "EXTRACTION_PROGRESS" | "DISCOVERY_PROGRESS" | "STATUS_UPDATE";
+  type: "EXTRACTION_PROGRESS" | "DISCOVERY_PROGRESS" | "STATUS_UPDATE" | "JOB_PROGRESS" | "JOB_COMPLETED" | "JOB_FAILED";
   step?: string;
   progress: number;
   message: string;
@@ -14,61 +13,49 @@ export interface TelemetryEvent {
 
 export class WebSocketHub {
   private connections: Map<string, Set<WebSocket>> = new Map();
-  private redisSubscriber: Redis | null = null;
-  private redisClient: Redis | null = null;
 
   constructor() {
     try {
-      this.redisClient = new Redis(env.REDIS_URL, {
-        maxRetriesPerRequest: null,
-        enableReadyCheck: false,
-        retryStrategy: () => 5000,
-      });
+      const subscriber = redisManager.getSubscriber();
 
-      this.redisSubscriber = new Redis(env.REDIS_URL, {
-        maxRetriesPerRequest: null,
-        enableReadyCheck: false,
-        retryStrategy: () => 5000,
-      });
-
-      const handleMessage = (channel: string, message: string) => {
+      const handleMessage = (_channel: string, message: string) => {
         try {
           const parsed = JSON.parse(message);
           const sessionId = parsed.session_id || parsed.sessionId;
           if (sessionId) {
             this.broadcastToSession(sessionId, parsed);
           }
-        } catch (err) {
-          console.error("Redis message parse error:", err);
+        } catch {
+          // parse error
         }
       };
 
-      this.redisSubscriber.on("message", (channel, message) => {
+      subscriber.on("message", (channel, message) => {
         handleMessage(channel, message);
       });
 
-      this.redisSubscriber.on("pmessage", (_pattern, channel, message) => {
+      subscriber.on("pmessage", (_pattern, channel, message) => {
         handleMessage(channel, message);
       });
 
-      this.redisSubscriber.psubscribe("session:*:progress", "session:*:discovery", "session:*");
+      subscriber.psubscribe("session:*:progress", "session:*:discovery", "session:*").catch(() => {});
 
       // Keepalive heartbeat to prevent cloud/browser idle timeouts
       setInterval(() => {
-        for (const [sessionId, clientSet] of this.connections.entries()) {
+        for (const [, clientSet] of this.connections.entries()) {
           for (const client of clientSet) {
             if (client.readyState === 1) { // OPEN
               try {
                 client.ping();
               } catch {
-                // ignore ping error
+                // ignore
               }
             }
           }
         }
-      }, 15000);
-    } catch (err) {
-      console.warn("Redis pub/sub initialization skipped:", err);
+      }, 15000).unref();
+    } catch (err: any) {
+      console.warn("[WebSocketHub] Redis pub/sub initialization warning:", err.message);
     }
   }
 
@@ -84,12 +71,11 @@ export class WebSocketHub {
 
     // Replay recent log history from Redis to the new connection (capped at last 200 events)
     try {
-      if (this.redisClient) {
-        const storedLogs = await this.redisClient.lrange(`session:${sessionId}:logs`, -200, -1);
-        for (const logStr of storedLogs) {
-          if (socket.readyState === 1) {
-            socket.send(logStr);
-          }
+      const client = redisManager.getClient();
+      const storedLogs = await client.lrange(`session:${sessionId}:logs`, -200, -1);
+      for (const logStr of storedLogs) {
+        if (socket.readyState === 1) {
+          socket.send(logStr);
         }
       }
     } catch {
@@ -102,31 +88,29 @@ export class WebSocketHub {
    */
   async expireSessionKeys(sessionId: string, ttlSeconds: number = 7200) {
     try {
-      if (this.redisClient) {
-        const pipeline = this.redisClient.pipeline();
-        pipeline.expire(`session:${sessionId}:logs`, ttlSeconds);
-        pipeline.expire(`session:${sessionId}:discovery_logs`, ttlSeconds);
-        pipeline.expire(`session:${sessionId}:discovery_state`, ttlSeconds);
-        pipeline.expire(`session:${sessionId}:state`, ttlSeconds);
-        await pipeline.exec();
-      }
-    } catch (err) {
-      console.warn("Failed to set expiry on session keys in Redis:", err);
+      const client = redisManager.getClient();
+      const pipeline = client.pipeline();
+      pipeline.expire(`session:${sessionId}:logs`, ttlSeconds);
+      pipeline.expire(`session:${sessionId}:discovery_logs`, ttlSeconds);
+      pipeline.expire(`session:${sessionId}:discovery_state`, ttlSeconds);
+      pipeline.expire(`session:${sessionId}:state`, ttlSeconds);
+      await pipeline.exec();
+    } catch {
+      // ignore
     }
   }
 
   async clearSessionLogs(sessionId: string) {
     try {
-      if (this.redisClient) {
-        const pipeline = this.redisClient.pipeline();
-        pipeline.del(`session:${sessionId}:logs`);
-        pipeline.del(`session:${sessionId}:discovery_logs`);
-        pipeline.del(`session:${sessionId}:discovery_state`);
-        pipeline.del(`session:${sessionId}:state`);
-        await pipeline.exec();
-      }
-    } catch (err) {
-      console.warn("Failed to clear session logs in Redis:", err);
+      const client = redisManager.getClient();
+      const pipeline = client.pipeline();
+      pipeline.del(`session:${sessionId}:logs`);
+      pipeline.del(`session:${sessionId}:discovery_logs`);
+      pipeline.del(`session:${sessionId}:discovery_state`);
+      pipeline.del(`session:${sessionId}:state`);
+      await pipeline.exec();
+    } catch {
+      // ignore
     }
   }
 
@@ -147,7 +131,11 @@ export class WebSocketHub {
     const payload = JSON.stringify(data);
     for (const client of clients) {
       if (client.readyState === 1) { // OPEN
-        client.send(payload);
+        try {
+          client.send(payload);
+        } catch {
+          // ignore
+        }
       }
     }
   }

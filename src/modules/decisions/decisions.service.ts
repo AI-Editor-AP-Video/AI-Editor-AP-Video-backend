@@ -1,6 +1,7 @@
 import { prisma } from "../../infrastructure/db/prisma.js";
 import { AppError } from "../../middleware/errorHandler.js";
 import { aiServiceClient } from "../../infrastructure/ai-client/ai-service-client.js";
+import { queueService, QUEUE_NAMES } from "../../infrastructure/queue/queue.service.js";
 
 export interface SubmitFeedbackInput {
   candidate_id: string;
@@ -169,6 +170,45 @@ export class DecisionsService {
       notes: d.notes,
       created_at: d.createdAt,
     }));
+  }
+
+  /**
+   * Dispatch Phase 5 Social Media Multi-Platform Publishing Job to BullMQ
+   */
+  async publishCandidate(candidateId: string, input: {
+    platforms: ("YOUTUBE_SHORTS" | "INSTAGRAM_REELS" | "TIKTOK" | "TWITTER")[];
+    title?: string;
+    description?: string;
+    tags?: string[];
+  }) {
+    const candidate = await prisma.candidateClip.findUnique({
+      where: { id: candidateId },
+    });
+
+    if (!candidate) {
+      throw new AppError(`Candidate clip '${candidateId}' not found`, 404);
+    }
+
+    const job = await queueService.addJob(
+      QUEUE_NAMES.PUBLISH,
+      `publish-${candidateId}`,
+      {
+        candidateId,
+        sessionId: candidate.sessionId,
+        platforms: input.platforms || ["YOUTUBE_SHORTS", "INSTAGRAM_REELS"],
+        title: input.title || candidate.headline,
+        description: input.description,
+        tags: input.tags,
+      }
+    );
+
+    return {
+      status: "PUBLISH_QUEUED",
+      jobId: job.jobId,
+      candidate_id: candidateId,
+      platforms: input.platforms,
+      message: "Multi-platform publishing job enqueued with BullMQ worker.",
+    };
   }
 }
 

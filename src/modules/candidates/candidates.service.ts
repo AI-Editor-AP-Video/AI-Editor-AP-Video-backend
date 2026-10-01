@@ -3,6 +3,7 @@ import { AppError } from "../../middleware/errorHandler.js";
 import { aiServiceClient } from "../../infrastructure/ai-client/ai-service-client.js";
 import { s3Service } from "../../infrastructure/storage/s3.js";
 import { cacheService } from "../../infrastructure/cache/cache.service.js";
+import { queueService, QUEUE_NAMES } from "../../infrastructure/queue/queue.service.js";
 import type {
   ListCandidatesQuery,
   TrimCandidateInput,
@@ -240,18 +241,27 @@ export class CandidatesService {
   async exportClip(id: string, input: ExportClipInput) {
     const candidate = await this.getCandidateById(id);
 
-    try {
-      const renderRes = await aiServiceClient.renderVerticalClip({
+    // 1. Dispatch Phase 3: 9:16 Vertical Video Render job to BullMQ
+    const renderJob = await queueService.addJob(
+      QUEUE_NAMES.RENDER,
+      `render-${id}`,
+      {
         candidateId: candidate.id,
         sessionId: candidate.sessionId,
         videoPath: candidate.session?.masterVideoS3Key || candidate.session?.proxyVideoS3Key,
         startTime: candidate.startTime,
         endTime: candidate.endTime,
-        burnSubtitles: true,
         aspectRatio: input.aspectRatio || "9:16",
-      });
+        burnSubtitles: true,
+        format: input.format,
+      }
+    );
 
-      const thumbRes = await aiServiceClient.generateThumbnail({
+    // 2. Dispatch Phase 4: High-CTR Thumbnail Generation job to BullMQ
+    const thumbJob = await queueService.addJob(
+      QUEUE_NAMES.THUMBNAIL,
+      `thumb-${id}`,
+      {
         candidateId: candidate.id,
         sessionId: candidate.sessionId,
         videoPath: candidate.session?.masterVideoS3Key || candidate.session?.proxyVideoS3Key,
@@ -259,55 +269,19 @@ export class CandidatesService {
         endTime: candidate.endTime,
         headline: candidate.headline,
         channelTag: "आचार्य प्रशांत",
-      });
+      }
+    );
 
-      const existingAnalysis = (candidate.llmAnalysis as Record<string, any>) || {};
-      const updatedAnalysis = {
-        ...existingAnalysis,
-        export_render: {
-          status: "COMPLETED",
-          video_url: renderRes.output_url,
-          video_path: renderRes.output_path,
-          thumbnail_url: thumbRes.thumbnail_url,
-          thumbnail_path: thumbRes.thumbnail_path,
-          ctr_score: thumbRes.ctr_score,
-          duration_seconds: renderRes.duration_seconds,
-          crop_x: renderRes.crop_x,
-          subtitles_burned: renderRes.subtitles_burned,
-          rendered_at: new Date().toISOString(),
-        },
-      };
-
-      await prisma.candidateClip.update({
-        where: { id },
-        data: { llmAnalysis: updatedAnalysis },
-      });
-
-      await cacheService.del(`candidate:${id}`);
-      await cacheService.delByPattern("candidates:list:*");
-
-      return {
-        status: "COMPLETED",
-        candidate_id: id,
-        format: input.format,
-        aspect_ratio: input.aspectRatio || "9:16",
-        video_url: renderRes.output_url,
-        thumbnail_url: thumbRes.thumbnail_url,
-        ctr_score: thumbRes.ctr_score,
-        duration_seconds: renderRes.duration_seconds,
-        subtitles_burned: renderRes.subtitles_burned,
-      };
-    } catch (err: any) {
-      console.error(`Export rendering failed for candidate ${id}:`, err);
-      return {
-        status: "RENDER_JOB_QUEUED",
-        candidate_id: id,
-        format: input.format,
-        aspect_ratio: input.aspectRatio || "9:16",
-        message: `Render job queued. Error details: ${err.message || err}`,
-        output_filename: `AP_${candidate.discourseType}_${candidate.id}_${input.format}.mp4`,
-      };
-    }
+    return {
+      status: "PROCESSING",
+      candidate_id: id,
+      renderJobId: renderJob.jobId,
+      thumbJobId: thumbJob.jobId,
+      format: input.format,
+      aspect_ratio: input.aspectRatio || "9:16",
+      message: `Phase 3 vertical render and thumbnail compositing jobs dispatched to BullMQ workers.`,
+      output_filename: `AP_${candidate.discourseType}_${candidate.id}_${input.format}.mp4`,
+    };
   }
 
   async getTimelineRecommendations(id: string) {

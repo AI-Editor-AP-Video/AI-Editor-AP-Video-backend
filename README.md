@@ -15,12 +15,31 @@ npx prisma db push
 # Generate Prisma Client
 npx prisma generate
 
-# Start development server on http://localhost:4000
-pnpm dev
+# Start API server in development
+pnpm dev:api
+
+# Start standalone BullMQ worker in development
+pnpm dev:worker
 
 # Build and start in production
 pnpm build
-pnpm start
+pnpm start:api      # Starts HTTP API Server
+pnpm start:worker   # Starts Dedicated BullMQ Worker
+```
+
+## Production Docker Deployment
+
+Deploy both the HTTP API server and standalone background worker with Docker Compose:
+
+```bash
+# Build and launch both API and Worker containers
+docker compose -f docker-compose.prod.yml up -d --build
+
+# Monitor live worker logs
+docker compose -f docker-compose.prod.yml logs -f backend-worker
+
+# Scale worker instances horizontally
+docker compose -f docker-compose.prod.yml up -d --scale backend-worker=2
 ```
 
 ## Features

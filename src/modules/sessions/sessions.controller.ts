@@ -4,6 +4,10 @@ import {
   CreateSessionSchema,
   GenerateUploadUrlSchema,
   ListSessionsQuerySchema,
+  InitiateMultipartSchema,
+  GetPartUrlsSchema,
+  CompleteMultipartSchema,
+  AbortMultipartSchema,
 } from "./sessions.schema.js";
 import { validateSchema } from "../../middleware/validateRequest.js";
 
@@ -17,12 +21,52 @@ export async function sessionsRoutes(fastify: FastifyInstance) {
     }
   );
 
-  // Request direct S3 pre-signed upload URL
+  // Request direct S3 pre-signed upload URL (Single Part)
   fastify.post(
     "/api/sessions/upload-url",
     { preHandler: validateSchema({ body: GenerateUploadUrlSchema }) },
     async (req) => {
       return sessionsService.generateUploadUrl(req.body as any);
+    }
+  );
+
+  // ── Parallel S3/R2 Multipart Upload Endpoints ──
+
+  // 1. Initiate Multipart Upload Session
+  fastify.post(
+    "/api/sessions/multipart/initiate",
+    { preHandler: validateSchema({ body: InitiateMultipartSchema }) },
+    async (req) => {
+      return sessionsService.initiateMultipartUpload(req.body as any);
+    }
+  );
+
+  // 2. Request additional signed Part URLs on-demand
+  fastify.post(
+    "/api/sessions/multipart/part-urls",
+    { preHandler: validateSchema({ body: GetPartUrlsSchema }) },
+    async (req) => {
+      return sessionsService.generatePartUrls(req.body as any);
+    }
+  );
+
+  // 3. Complete and assemble Multipart Upload in R2
+  fastify.post(
+    "/api/sessions/multipart/complete",
+    { preHandler: validateSchema({ body: CompleteMultipartSchema }) },
+    async (req, reply) => {
+      const result = await sessionsService.completeMultipartUpload(req.body as any);
+      reply.status(201);
+      return result;
+    }
+  );
+
+  // 4. Abort incomplete Multipart Upload
+  fastify.post(
+    "/api/sessions/multipart/abort",
+    { preHandler: validateSchema({ body: AbortMultipartSchema }) },
+    async (req) => {
+      return sessionsService.abortMultipartUpload(req.body as any);
     }
   );
 

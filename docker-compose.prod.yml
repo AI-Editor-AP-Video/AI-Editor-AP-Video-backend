@@ -1,10 +1,17 @@
 name: ap-editorial-backend
 
 services:
-  backend:
+  # ─────────────────────────────────────────────────────────────
+  # 1. High-Performance Fastify HTTP API & WebSocket Gateway
+  # ─────────────────────────────────────────────────────────────
+  backend-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: ${BACKEND_IMAGE:-ghcr.io/ai-editor-ap-video/ai-editor-ap-video-backend:latest}
-    container_name: ap_editorial_backend
+    container_name: ap_editorial_api
     restart: unless-stopped
+    command: ["node", "dist/server.js"]
     ports:
       # Cloudflare Edge terminates SSL and forwards traffic to EC2 on HTTP port 80
       - "80:4000"
@@ -13,16 +20,17 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=4000
-      - NODE_OPTIONS=--max-old-space-size=1536
+      - START_WORKERS_INLINE=false
+      - NODE_OPTIONS=--max-old-space-size=1024
     volumes:
       - uploads_data:/app/uploads
-    # Memory safety guards to prevent Linux kernel OOM kills
+    # Memory and CPU limits to ensure rock-solid stability
     deploy:
       resources:
         limits:
-          memory: 1800M
+          memory: 1024M
         reservations:
-          memory: 512M
+          memory: 256M
     # Strict Docker log rotation (max 60MB total across 3 files)
     logging:
       driver: "json-file"
@@ -35,6 +43,41 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  # ─────────────────────────────────────────────────────────────
+  # 2. Dedicated Standalone BullMQ Worker Process
+  #    Executes: Extraction, Discovery, Render, Thumbnail, Publish
+  # ─────────────────────────────────────────────────────────────
+  backend-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE:-ghcr.io/ai-editor-ap-video/ai-editor-ap-video-backend:latest}
+    container_name: ap_editorial_worker
+    restart: unless-stopped
+    command: ["node", "dist/worker.js"]
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - NODE_OPTIONS=--max-old-space-size=1536
+    volumes:
+      - uploads_data:/app/uploads
+    # Dedicated resources for queue processing
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 384M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+    depends_on:
+      backend-api:
+        condition: service_healthy
 
 volumes:
   uploads_data:

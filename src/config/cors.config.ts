@@ -59,6 +59,8 @@ export const corsConfig: FastifyCorsOptions = {
     "X-Session-Title",
     "X-Client-Version",
     "Range",
+    "ETag",
+    "etag",
   ],
   exposedHeaders: [
     "Set-Cookie",
@@ -67,6 +69,8 @@ export const corsConfig: FastifyCorsOptions = {
     "Content-Range",
     "Accept-Ranges",
     "Content-Length",
+    "ETag",
+    "etag",
   ],
   maxAge: 86400,
   preflightContinue: false,

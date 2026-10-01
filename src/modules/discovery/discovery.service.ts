@@ -1,6 +1,6 @@
 import { prisma } from "../../infrastructure/db/prisma.js";
-import { aiServiceClient } from "../../infrastructure/ai-client/ai-service-client.js";
 import { wsHub } from "../../infrastructure/websocket/ws-hub.js";
+import { queueService, QUEUE_NAMES } from "../../infrastructure/queue/queue.service.js";
 import { AppError } from "../../middleware/errorHandler.js";
 import type { LaunchDiscoveryInput } from "./discovery.schema.js";
 
@@ -60,18 +60,11 @@ export class DiscoveryService {
       },
     });
 
-    // Trigger Python AI service for candidate mining and AP Rubric scoring
-    await aiServiceClient.triggerDiscovery(
-      sessionId,
-      runId,
-      input.mode,
-      effectiveFocus,
-      input.customPrompt,
-      input.formatPreset,
-      input.targetLanguage,
-      input.minDuration,
-      input.maxDuration,
-      input.maxCandidates
+    // Enqueue background job to BullMQ discovery queue for async worker processing
+    await queueService.addJob(
+      QUEUE_NAMES.DISCOVERY,
+      `discovery-${sessionId}-${runId}`,
+      { runId, sessionId, input: { ...input, focusOptions: effectiveFocus } }
     );
 
     return discoveryRun;
