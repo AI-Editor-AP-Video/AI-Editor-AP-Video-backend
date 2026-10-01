@@ -2,68 +2,28 @@ import type { FastifyCorsOptions } from "@fastify/cors";
 import { env } from "./env.js";
 
 /**
- * Extracts and normalizes the full list of allowed origins strictly from environment variables.
- * Zero hardcoded domain names or URLs.
+ * Returns allowed origins from FRONTEND_URL environment variable.
  */
 export function getAllowedOrigins(): string[] {
-  const origins = new Set<string>();
-
-  // 1. Primary frontend URL from environment
-  if (env.FRONTEND_URL) {
-    origins.add(env.FRONTEND_URL.trim().replace(/\/$/, ""));
-  }
-
-  // 2. Additional comma-separated origins from environment (ALLOWED_ORIGINS)
-  if (env.ALLOWED_ORIGINS) {
-    env.ALLOWED_ORIGINS.split(",")
-      .map((origin) => origin.trim().replace(/\/$/, ""))
-      .filter(Boolean)
-      .forEach((origin) => origins.add(origin));
-  }
-
-  return Array.from(origins);
+  if (!env.FRONTEND_URL) return [];
+  return env.FRONTEND_URL.split(",")
+    .map((o) => o.trim().replace(/\/$/, ""))
+    .filter(Boolean);
 }
 
 /**
- * Validates whether an incoming request Origin is permitted based purely on environment config.
+ * Checks if the request origin is permitted.
  */
 export function isOriginAllowed(origin: string | undefined): boolean {
-  // Allow requests without Origin header (e.g. mobile apps, cURL, server-to-server AI webhooks, Docker healthchecks)
-  if (!origin) {
-    return true;
-  }
+  // Allow non-browser requests without Origin header (curl, healthchecks, internal AI webhooks)
+  if (!origin) return true;
+
+  if (env.NODE_ENV === "development") return true;
 
   const cleanOrigin = origin.trim().replace(/\/$/, "");
-  const allowedOrigins = getAllowedOrigins();
+  const allowed = getAllowedOrigins();
 
-  // If no origins explicitly defined, allow only if non-production
-  if (allowedOrigins.length === 0) {
-    return env.NODE_ENV !== "production";
-  }
-
-  // Exact match against environment allowed origins
-  if (allowedOrigins.includes(cleanOrigin)) {
-    return true;
-  }
-
-  // Wildcard pattern matching if explicitly supplied in environment (e.g., https://*.example.com)
-  for (const allowed of allowedOrigins) {
-    if (allowed.includes("*")) {
-      const regexPattern = new RegExp(
-        "^" + allowed.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$"
-      );
-      if (regexPattern.test(cleanOrigin)) {
-        return true;
-      }
-    }
-  }
-
-  // In development mode, permit all origins for developer convenience
-  if (env.NODE_ENV === "development") {
-    return true;
-  }
-
-  return false;
+  return allowed.length === 0 || allowed.includes(cleanOrigin);
 }
 
 export const corsConfig: FastifyCorsOptions = {
@@ -96,6 +56,6 @@ export const corsConfig: FastifyCorsOptions = {
     "Accept-Ranges",
     "Content-Length",
   ],
-  maxAge: 86400, // 24 hours preflight cache
+  maxAge: 86400,
   preflightContinue: false,
 };

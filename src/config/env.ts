@@ -10,23 +10,22 @@ const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   PORT: z.coerce.number().default(4000),
 
-  // Core Infrastructure (Required directly from environment)
+  // Core Infrastructure
   DATABASE_URL: z.string().min(1, "DATABASE_URL environment variable is required"),
   REDIS_URL: z.string().min(1, "REDIS_URL environment variable is required"),
   AI_SERVICE_URL: z.string().min(1, "AI_SERVICE_URL environment variable is required"),
-  
-  // Cloudflare R2 Storage (Used for both Dev & Prod)
+
+  // Cloudflare R2 Storage
   CLOUDFLARE_R2_ENDPOINT: z.string().min(1, "CLOUDFLARE_R2_ENDPOINT is required"),
   CLOUDFLARE_R2_ACCESS_KEY_ID: z.string().min(1, "CLOUDFLARE_R2_ACCESS_KEY_ID is required"),
   CLOUDFLARE_R2_SECRET_ACCESS_KEY: z.string().min(1, "CLOUDFLARE_R2_SECRET_ACCESS_KEY is required"),
   CLOUDFLARE_R2_BUCKET: z.string().min(1, "CLOUDFLARE_R2_BUCKET is required"),
   CLOUDFLARE_R2_REGION: z.string().default("auto"),
 
-  // Frontend URL & Authentication
+  // Frontend & Authentication
   FRONTEND_URL: z.string().min(1, "FRONTEND_URL environment variable is required"),
   BETTER_AUTH_SECRET: z.string().min(1, "BETTER_AUTH_SECRET environment variable is required"),
   BETTER_AUTH_URL: z.string().optional(),
-  ALLOWED_ORIGINS: z.string().optional(),
 });
 
 export const env = envSchema.parse({
@@ -43,7 +42,6 @@ export const env = envSchema.parse({
   FRONTEND_URL: process.env.FRONTEND_URL,
   BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
   BETTER_AUTH_URL: process.env.BETTER_AUTH_URL,
-  ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS,
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;
