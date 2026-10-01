@@ -11,13 +11,14 @@ export interface ThumbnailJobPayload {
   endTime: number;
   headline: string;
   channelTag?: string;
+  aspectRatio?: string;
 }
 
 /**
  * Worker processor for Phase 4: High-CTR Keyframe & Hindi Typography Thumbnail Compositing
  */
 export async function processThumbnailJob(job: Job<ThumbnailJobPayload>) {
-  const { candidateId, sessionId, videoPath, startTime, endTime, headline, channelTag } = job.data;
+  const { candidateId, sessionId, videoPath, startTime, endTime, headline, channelTag, aspectRatio } = job.data;
 
   await job.updateProgress(15);
 
@@ -30,7 +31,11 @@ export async function processThumbnailJob(job: Job<ThumbnailJobPayload>) {
     throw new Error(`Candidate clip '${candidateId}' not found for thumbnail generation`);
   }
 
-  const resolvedVideoPath = videoPath || candidate.session?.masterVideoS3Key || candidate.session?.proxyVideoS3Key;
+  const rawPath = videoPath || candidate.session?.masterVideoS3Key || candidate.session?.proxyVideoS3Key;
+  let resolvedVideoPath = rawPath || `sessions/${sessionId}/master.mp4`;
+  if (resolvedVideoPath.startsWith("/api/media/")) {
+    resolvedVideoPath = resolvedVideoPath.replace(/^\/api\/media\//, "");
+  }
 
   await job.updateProgress(35);
 
@@ -44,12 +49,17 @@ export async function processThumbnailJob(job: Job<ThumbnailJobPayload>) {
       endTime: endTime ?? candidate.endTime,
       headline: headline || candidate.headline,
       channelTag: channelTag || "आचार्य प्रशांत",
+      aspectRatio: aspectRatio || "9:16",
     });
 
     await job.updateProgress(75);
 
-    // 2. Persist thumbnail metadata into candidate llmAnalysis
-    const existingAnalysis = (candidate.llmAnalysis as Record<string, any>) || {};
+    // 2. Fetch fresh candidate state from DB to prevent overwriting concurrent render worker updates
+    const freshCandidate = await prisma.candidateClip.findUnique({
+      where: { id: candidateId },
+      select: { llmAnalysis: true },
+    });
+    const existingAnalysis = (freshCandidate?.llmAnalysis as Record<string, any>) || (candidate.llmAnalysis as Record<string, any>) || {};
     const updatedAnalysis = {
       ...existingAnalysis,
       thumbnail: {
@@ -59,6 +69,7 @@ export async function processThumbnailJob(job: Job<ThumbnailJobPayload>) {
         ctr_score: thumbRes.ctr_score,
         frame_timestamp: thumbRes.selected_timestamp,
         metrics: thumbRes.metrics,
+        aspect_ratio: aspectRatio || "9:16",
         generated_at: new Date().toISOString(),
       },
     };
@@ -71,6 +82,7 @@ export async function processThumbnailJob(job: Job<ThumbnailJobPayload>) {
     // 3. Invalidate Redis cache
     await cacheService.del(`candidate:${candidateId}`);
     await cacheService.delByPattern("candidates:list:*");
+    await cacheService.del(`session:meta:${sessionId}`);
 
     await job.updateProgress(100);
 
@@ -79,6 +91,7 @@ export async function processThumbnailJob(job: Job<ThumbnailJobPayload>) {
       candidateId,
       thumbnailUrl: thumbRes.thumbnail_url,
       ctrScore: thumbRes.ctr_score,
+      aspectRatio: aspectRatio || "9:16",
     };
   } catch (err: any) {
     console.error(`[ThumbnailWorker] Failed generating thumbnail for candidate ${candidateId}:`, err.message);

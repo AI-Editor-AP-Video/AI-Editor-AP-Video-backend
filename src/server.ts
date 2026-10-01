@@ -180,13 +180,13 @@ if (process.env.NODE_ENV !== "test") {
     await server.listen({ port: env.PORT, host: "0.0.0.0" });
     console.log(`🚀 Production-grade AP Editorial API Server live on http://0.0.0.0:${env.PORT}`);
 
-    // Run BullMQ background workers in-process by default (unless explicitly set to false for dedicated worker containers)
-    const runInlineWorkers = process.env.START_WORKERS_INLINE !== "false";
+    // Run BullMQ background workers in-process only if explicitly enabled (e.g. single-process hosting)
+    const runInlineWorkers = process.env.START_WORKERS_INLINE === "true";
     if (runInlineWorkers) {
-      console.log("⚡ [Server] Running BullMQ workers in-process (inline mode active)...");
+      console.log("⚡ [Server] Running BullMQ workers in-process (inline mode)...");
       initBackgroundWorkers();
     } else {
-      console.log("ℹ️  [Server] Running in standalone API mode (external worker process expected)");
+      console.log("ℹ️  [Server] Running in standalone API mode (BullMQ worker running via pnpm worker)");
     }
 
     const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];

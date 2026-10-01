@@ -31,7 +31,29 @@ export async function processRenderJob(job: Job<RenderJobPayload>) {
     throw new Error(`Candidate clip '${candidateId}' not found for rendering`);
   }
 
-  const resolvedVideoPath = videoPath || candidate.session?.masterVideoS3Key || candidate.session?.proxyVideoS3Key;
+  // Set status to PROCESSING in DB to ensure real-time polling reflects active render
+  const initAnalysis = (candidate.llmAnalysis as Record<string, any>) || {};
+  await prisma.candidateClip.update({
+    where: { id: candidateId },
+    data: {
+      llmAnalysis: {
+        ...initAnalysis,
+        export_render: {
+          status: "PROCESSING",
+          aspect_ratio: aspectRatio || "9:16",
+          format: format || "YOUTUBE_SHORTS",
+          started_at: new Date().toISOString(),
+        },
+      },
+    },
+  }).catch(() => {});
+  await cacheService.del(`candidate:${candidateId}`);
+
+  const rawPath = videoPath || candidate.session?.masterVideoS3Key || candidate.session?.proxyVideoS3Key;
+  let resolvedVideoPath = rawPath || `sessions/${sessionId}/master.mp4`;
+  if (resolvedVideoPath.startsWith("/api/media/")) {
+    resolvedVideoPath = resolvedVideoPath.replace(/^\/api\/media\//, "");
+  }
 
   await job.updateProgress(25);
 
@@ -49,8 +71,12 @@ export async function processRenderJob(job: Job<RenderJobPayload>) {
 
     await job.updateProgress(75);
 
-    // 2. Persist rendered short asset metadata into PostgreSQL
-    const existingAnalysis = (candidate.llmAnalysis as Record<string, any>) || {};
+    // 2. Fetch fresh candidate state from DB to prevent overwriting concurrent thumbnail worker updates
+    const freshCandidate = await prisma.candidateClip.findUnique({
+      where: { id: candidateId },
+      select: { llmAnalysis: true },
+    });
+    const existingAnalysis = (freshCandidate?.llmAnalysis as Record<string, any>) || (candidate.llmAnalysis as Record<string, any>) || {};
     const updatedAnalysis = {
       ...existingAnalysis,
       export_render: {

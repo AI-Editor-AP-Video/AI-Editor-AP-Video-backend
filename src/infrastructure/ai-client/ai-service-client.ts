@@ -156,6 +156,7 @@ export class AIServiceClient {
     endTime: number;
     headline: string;
     channelTag?: string;
+    aspectRatio?: string;
   }): Promise<{
     status: string;
     candidate_id: string;
@@ -176,6 +177,7 @@ export class AIServiceClient {
         end_time: params.endTime,
         headline: params.headline,
         channel_tag: params.channelTag ?? "आचार्य प्रशांत",
+        aspect_ratio: params.aspectRatio ?? "9:16",
       }),
     });
     if (!res.ok) {

@@ -61,7 +61,13 @@ export class CandidatesService {
 
         return candidates.map((c) => {
           const llm = (c.llmAnalysis as any) || {};
-          const thumbUrl = llm.thumbnail?.thumbnail_url || llm.export_render?.thumbnail_url || null;
+          const isImage = (url?: string | null) =>
+            url && typeof url === "string" && !url.toLowerCase().endsWith(".mp4") && !url.toLowerCase().endsWith(".webm");
+          const rawThumb = isImage(llm.thumbnail?.thumbnail_url)
+            ? llm.thumbnail.thumbnail_url
+            : isImage(llm.export_render?.thumbnail_url)
+            ? llm.export_render.thumbnail_url
+            : null;
           const ctrScore = llm.thumbnail?.ctr_score ?? llm.export_render?.ctr_score ?? null;
 
           return {
@@ -86,7 +92,7 @@ export class CandidatesService {
             research_references: c.researchReferences,
             status: c.status,
             created_at: c.createdAt,
-            thumbnail_url: thumbUrl ? s3Service.getAssetPublicUrl(thumbUrl) : null,
+            thumbnail_url: rawThumb ? s3Service.getAssetPublicUrl(rawThumb) : null,
             ctr_score: ctrScore,
           };
         });
@@ -118,7 +124,13 @@ export class CandidatesService {
         }
 
         const llm = (candidate.llmAnalysis as any) || {};
-        const thumbUrl = llm.thumbnail?.thumbnail_url || llm.export_render?.thumbnail_url || null;
+        const isImage = (url?: string | null) =>
+          url && typeof url === "string" && !url.toLowerCase().endsWith(".mp4") && !url.toLowerCase().endsWith(".webm");
+        const rawThumb = isImage(llm.thumbnail?.thumbnail_url)
+          ? llm.thumbnail.thumbnail_url
+          : isImage(llm.export_render?.thumbnail_url)
+          ? llm.export_render.thumbnail_url
+          : null;
         const ctrScore = llm.thumbnail?.ctr_score ?? llm.export_render?.ctr_score ?? null;
 
         return {
@@ -140,7 +152,7 @@ export class CandidatesService {
           research_references: candidate.researchReferences,
           created_at: candidate.createdAt,
           proxy_url: candidate.session?.proxyVideoS3Key ? s3Service.getAssetPublicUrl(candidate.session.proxyVideoS3Key) : null,
-          thumbnail_url: thumbUrl ? s3Service.getAssetPublicUrl(thumbUrl) : null,
+          thumbnail_url: rawThumb ? s3Service.getAssetPublicUrl(rawThumb) : null,
           ctr_score: ctrScore,
         };
       },
@@ -241,6 +253,30 @@ export class CandidatesService {
   async exportClip(id: string, input: ExportClipInput) {
     const candidate = await this.getCandidateById(id);
 
+    // Reset export_render and thumbnail status to PROCESSING in database immediately
+    const existingAnalysis = (candidate.llm_analysis as Record<string, any>) || (candidate.llmAnalysis as Record<string, any>) || {};
+    await prisma.candidateClip.update({
+      where: { id },
+      data: {
+        llmAnalysis: {
+          ...existingAnalysis,
+          export_render: {
+            status: "PROCESSING",
+            format: input.format,
+            aspect_ratio: input.aspectRatio || "9:16",
+            started_at: new Date().toISOString(),
+          },
+          thumbnail: {
+            status: "PROCESSING",
+            aspect_ratio: input.aspectRatio || "9:16",
+            started_at: new Date().toISOString(),
+          },
+        },
+      },
+    }).catch(() => {});
+    await cacheService.del(`candidate:${id}`);
+    await cacheService.delByPattern("candidates:list:*");
+
     // 1. Dispatch Phase 3: 9:16 Vertical Video Render job to BullMQ
     const renderJob = await queueService.addJob(
       QUEUE_NAMES.RENDER,
@@ -269,6 +305,7 @@ export class CandidatesService {
         endTime: candidate.endTime,
         headline: candidate.headline,
         channelTag: "आचार्य प्रशांत",
+        aspectRatio: input.aspectRatio || "9:16",
       }
     );
 
