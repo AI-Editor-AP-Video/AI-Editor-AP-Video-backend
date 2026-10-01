@@ -25,6 +25,8 @@ const envSchema = z.object({
   // Frontend URL & Authentication
   FRONTEND_URL: z.string().min(1, "FRONTEND_URL environment variable is required"),
   BETTER_AUTH_SECRET: z.string().min(1, "BETTER_AUTH_SECRET environment variable is required"),
+  BETTER_AUTH_URL: z.string().optional(),
+  ALLOWED_ORIGINS: z.string().optional(),
 });
 
 export const env = envSchema.parse({
@@ -40,6 +42,8 @@ export const env = envSchema.parse({
   CLOUDFLARE_R2_REGION: process.env.CLOUDFLARE_R2_REGION || "auto",
   FRONTEND_URL: process.env.FRONTEND_URL,
   BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
+  BETTER_AUTH_URL: process.env.BETTER_AUTH_URL,
+  ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS,
 });
 
 export type EnvConfig = z.infer<typeof envSchema>;

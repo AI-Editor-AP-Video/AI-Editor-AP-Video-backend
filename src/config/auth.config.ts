@@ -5,15 +5,12 @@ import { env } from "./env.js";
 import { getAllowedOrigins } from "./cors.config.js";
 
 const baseURL =
-  process.env.BETTER_AUTH_URL ||
-  (env.NODE_ENV === "production"
-    ? "https://api-apeditor.vikashkr.online"
-    : `http://localhost:${env.PORT}`);
+  env.BETTER_AUTH_URL ||
+  (env.NODE_ENV === "production" ? env.FRONTEND_URL : `http://localhost:${env.PORT}`);
 
 /**
  * Production-Grade Better-Auth Instance
- * Configured with Prisma PostgreSQL adapter, Argon2/Scrypt secure password hashing,
- * 7-day sliding session expiration, and trusted origins.
+ * Configured purely from environment variables without hardcoded URLs or domains.
  */
 export const auth = betterAuth({
   database: prismaAdapter(prisma, {

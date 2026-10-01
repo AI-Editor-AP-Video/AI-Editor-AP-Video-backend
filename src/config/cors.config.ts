@@ -1,93 +1,65 @@
 import type { FastifyCorsOptions } from "@fastify/cors";
 import { env } from "./env.js";
 
-// Helper to check if an origin matches any allowed wildcard/regex pattern
-function isAllowedDomain(origin: string): boolean {
-  try {
-    const url = new URL(origin);
-    const hostname = url.hostname.toLowerCase();
-
-    // 1. Localhost and loopback interfaces for development
-    if (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "0.0.0.0" ||
-      hostname.endsWith(".localhost")
-    ) {
-      return true;
-    }
-
-    // 2. Production Domain and Subdomains (e.g. apeditor.vikashkr.online, api-apeditor.vikashkr.online)
-    if (hostname === "vikashkr.online" || hostname.endsWith(".vikashkr.online")) {
-      return true;
-    }
-
-    // 3. Vercel Preview Deployments (e.g. *-ai-editor-ap-video.vercel.app)
-    if (hostname === "vercel.app" || hostname.endsWith(".vercel.app")) {
-      return true;
-    }
-
-    // 4. Cloudflare Pages Deployments
-    if (hostname === "pages.dev" || hostname.endsWith(".pages.dev")) {
-      return true;
-    }
-
-    return false;
-  } catch {
-    return false;
-  }
-}
-
-// Build explicit allowed origins list from environment
+/**
+ * Extracts and normalizes the full list of allowed origins strictly from environment variables.
+ * Zero hardcoded domain names or URLs.
+ */
 export function getAllowedOrigins(): string[] {
   const origins = new Set<string>();
 
+  // 1. Primary frontend URL from environment
   if (env.FRONTEND_URL) {
-    origins.add(env.FRONTEND_URL.replace(/\/$/, ""));
+    origins.add(env.FRONTEND_URL.trim().replace(/\/$/, ""));
   }
 
-  // Standard development origins
-  origins.add("http://localhost:3000");
-  origins.add("http://localhost:3001");
-  origins.add("http://localhost:5173");
-  origins.add("http://127.0.0.1:3000");
-  origins.add("http://127.0.0.1:3001");
-
-  // Production domain default
-  origins.add("https://apeditor.vikashkr.online");
-  origins.add("https://api-apeditor.vikashkr.online");
-
-  // Additional custom comma-separated origins from ALLOWED_ORIGINS env
-  if (process.env.ALLOWED_ORIGINS) {
-    process.env.ALLOWED_ORIGINS.split(",")
-      .map((o) => o.trim().replace(/\/$/, ""))
+  // 2. Additional comma-separated origins from environment (ALLOWED_ORIGINS)
+  if (env.ALLOWED_ORIGINS) {
+    env.ALLOWED_ORIGINS.split(",")
+      .map((origin) => origin.trim().replace(/\/$/, ""))
       .filter(Boolean)
-      .forEach((o) => origins.add(o));
+      .forEach((origin) => origins.add(origin));
   }
 
   return Array.from(origins);
 }
 
+/**
+ * Validates whether an incoming request Origin is permitted based purely on environment config.
+ */
 export function isOriginAllowed(origin: string | undefined): boolean {
-  // Allow requests without Origin header (e.g. mobile apps, curl, server-to-server, health checks)
+  // Allow requests without Origin header (e.g. mobile apps, cURL, server-to-server AI webhooks, Docker healthchecks)
   if (!origin) {
     return true;
   }
 
-  const cleanOrigin = origin.replace(/\/$/, "");
-  const explicitOrigins = getAllowedOrigins();
+  const cleanOrigin = origin.trim().replace(/\/$/, "");
+  const allowedOrigins = getAllowedOrigins();
 
-  if (explicitOrigins.includes(cleanOrigin)) {
+  // If no origins explicitly defined, allow only if non-production
+  if (allowedOrigins.length === 0) {
+    return env.NODE_ENV !== "production";
+  }
+
+  // Exact match against environment allowed origins
+  if (allowedOrigins.includes(cleanOrigin)) {
     return true;
   }
 
-  // Allow dynamic matching against trusted domain patterns
-  if (isAllowedDomain(cleanOrigin)) {
-    return true;
+  // Wildcard pattern matching if explicitly supplied in environment (e.g., https://*.example.com)
+  for (const allowed of allowedOrigins) {
+    if (allowed.includes("*")) {
+      const regexPattern = new RegExp(
+        "^" + allowed.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$"
+      );
+      if (regexPattern.test(cleanOrigin)) {
+        return true;
+      }
+    }
   }
 
-  // In non-production environments, allow all origins for ease of testing
-  if (env.NODE_ENV !== "production") {
+  // In development mode, permit all origins for developer convenience
+  if (env.NODE_ENV === "development") {
     return true;
   }
 
@@ -97,7 +69,6 @@ export function isOriginAllowed(origin: string | undefined): boolean {
 export const corsConfig: FastifyCorsOptions = {
   origin: (origin, callback) => {
     if (isOriginAllowed(origin)) {
-      // In CORS with credentials, echoing back true authorizes the request with Origin
       callback(null, true);
     } else {
       callback(new Error(`CORS policy violation: Origin '${origin}' is not authorized`), false);
