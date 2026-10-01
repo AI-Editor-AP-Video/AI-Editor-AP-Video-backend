@@ -24,8 +24,10 @@ import { mediaRoutes } from "./modules/media/media.controller.js";
 export async function buildApp() {
   const server = Fastify({
     logger: {
-      level: env.NODE_ENV === "production" ? "info" : "debug",
+      level: env.NODE_ENV === "production" ? "warn" : "info",
     },
+    // Disable noisy automatic request/response logging for routine polling & healthchecks
+    disableRequestLogging: true,
     bodyLimit: 10 * 1024 * 1024 * 1024,
   });
 
