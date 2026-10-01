@@ -156,6 +156,10 @@ export async function buildApp() {
     };
   });
 
+  server.get("/.well-known/appspecific/com.chrome.devtools.json", async () => {
+    return {};
+  });
+
   return server;
 }
 
