@@ -2,6 +2,7 @@ import { prisma } from "../../infrastructure/db/prisma.js";
 import { AppError } from "../../middleware/errorHandler.js";
 import { aiServiceClient } from "../../infrastructure/ai-client/ai-service-client.js";
 import { s3Service } from "../../infrastructure/storage/s3.js";
+import { cacheService } from "../../infrastructure/cache/cache.service.js";
 import type {
   ListCandidatesQuery,
   TrimCandidateInput,
@@ -11,118 +12,139 @@ import type {
 import type { Prisma } from "@prisma/client";
 
 export class CandidatesService {
+  /**
+   * Fast Candidate List Query with Redis/Memory Caching
+   */
   async listCandidates(query: ListCandidatesQuery) {
-    const where: Prisma.CandidateClipWhereInput = {
-      finalApScore: { gte: query.min_score },
-    };
+    const cacheKey = `candidates:list:${JSON.stringify(query)}`;
 
-    if (query.session_id) {
-      where.sessionId = query.session_id;
-      if (!query.discovery_run_id) {
-        const latestRun = await prisma.discoveryRun.findFirst({
-          where: { sessionId: query.session_id, status: "COMPLETED" },
-          orderBy: { completedAt: "desc" },
-        });
-        if (latestRun) {
-          where.discoveryRunId = latestRun.id;
+    return cacheService.getOrSet(
+      cacheKey,
+      async () => {
+        const where: Prisma.CandidateClipWhereInput = {
+          finalApScore: { gte: query.min_score },
+        };
+
+        if (query.session_id) {
+          where.sessionId = query.session_id;
+          if (!query.discovery_run_id) {
+            const latestRun = await prisma.discoveryRun.findFirst({
+              where: { sessionId: query.session_id, status: "COMPLETED" },
+              orderBy: { completedAt: "desc" },
+              select: { id: true },
+            });
+            if (latestRun) {
+              where.discoveryRunId = latestRun.id;
+            }
+          }
         }
-      }
-    }
-    if (query.discovery_run_id) where.discoveryRunId = query.discovery_run_id;
-    if (query.discourse_type && query.discourse_type !== "ALL") {
-      where.discourseType = query.discourse_type;
-    }
-    if (query.status && query.status !== "ALL") {
-      where.status = query.status as any;
-    }
+        if (query.discovery_run_id) where.discoveryRunId = query.discovery_run_id;
+        if (query.discourse_type && query.discourse_type !== "ALL") {
+          where.discourseType = query.discourse_type;
+        }
+        if (query.status && query.status !== "ALL") {
+          where.status = query.status as any;
+        }
 
-    const candidates = await prisma.candidateClip.findMany({
-      where,
-      orderBy: { finalApScore: "desc" },
-      take: query.limit,
-      skip: query.offset,
-      include: {
-        session: {
-          select: { title: true, seriesCategory: true },
-        },
+        const candidates = await prisma.candidateClip.findMany({
+          where,
+          orderBy: { finalApScore: "desc" },
+          take: query.limit,
+          skip: query.offset,
+          include: {
+            session: {
+              select: { title: true, seriesCategory: true },
+            },
+          },
+        });
+
+        return candidates.map((c) => {
+          const llm = (c.llmAnalysis as any) || {};
+          const thumbUrl = llm.thumbnail?.thumbnail_url || llm.export_render?.thumbnail_url || null;
+          const ctrScore = llm.thumbnail?.ctr_score ?? llm.export_render?.ctr_score ?? null;
+
+          return {
+            id: c.id,
+            session_id: c.sessionId,
+            session_title: c.session.title,
+            series_category: c.session.seriesCategory,
+            rank: c.rank,
+            start_time: c.startTime,
+            end_time: c.endTime,
+            duration_seconds: c.durationSeconds,
+            headline: c.headline,
+            subtitle_quote: c.subtitleQuote,
+            discourse_type: c.discourseType,
+            detected_by: c.detectedBy,
+            topics: c.topics,
+            final_ap_score: c.finalApScore,
+            is_vetoed: c.isVetoed,
+            veto_reason: c.vetoReason,
+            ap_score_breakdown: c.apScoreBreakdown,
+            llm_analysis: c.llmAnalysis,
+            research_references: c.researchReferences,
+            status: c.status,
+            created_at: c.createdAt,
+            thumbnail_url: thumbUrl ? s3Service.getAssetPublicUrl(thumbUrl) : null,
+            ctr_score: ctrScore,
+          };
+        });
       },
-    });
-
-    return candidates.map((c) => {
-      const llm = (c.llmAnalysis as any) || {};
-      const thumbUrl = llm.thumbnail?.thumbnail_url || llm.export_render?.thumbnail_url || null;
-      const ctrScore = llm.thumbnail?.ctr_score ?? llm.export_render?.ctr_score ?? null;
-
-      return {
-        id: c.id,
-        session_id: c.sessionId,
-        session_title: c.session.title,
-        series_category: c.session.seriesCategory,
-        rank: c.rank,
-        start_time: c.startTime,
-        end_time: c.endTime,
-        duration_seconds: c.durationSeconds,
-        headline: c.headline,
-        subtitle_quote: c.subtitleQuote,
-        discourse_type: c.discourseType,
-        detected_by: c.detectedBy,
-        topics: c.topics,
-        final_ap_score: c.finalApScore,
-        is_vetoed: c.isVetoed,
-        veto_reason: c.vetoReason,
-        ap_score_breakdown: c.apScoreBreakdown,
-        llm_analysis: c.llmAnalysis,
-        research_references: c.researchReferences,
-        status: c.status,
-        created_at: c.createdAt,
-        thumbnail_url: thumbUrl ? s3Service.getAssetPublicUrl(thumbUrl) : null,
-        ctr_score: ctrScore,
-      };
-    });
+      15 // 15 seconds cache
+    );
   }
 
   async getCandidateById(id: string) {
-    const candidate = await prisma.candidateClip.findUnique({
-      where: { id },
-      include: {
-        session: true,
-        discoveryRun: true,
-        decisions: {
-          orderBy: { createdAt: "desc" },
-        },
+    const cacheKey = `candidate:${id}`;
+
+    return cacheService.getOrSet(
+      cacheKey,
+      async () => {
+        const candidate = await prisma.candidateClip.findUnique({
+          where: { id },
+          include: {
+            session: true,
+            discoveryRun: true,
+            decisions: {
+              orderBy: { createdAt: "desc" },
+              take: 10,
+            },
+          },
+        });
+
+        if (!candidate) {
+          throw new AppError(`Candidate clip '${id}' not found`, 404);
+        }
+
+        const llm = (candidate.llmAnalysis as any) || {};
+        const thumbUrl = llm.thumbnail?.thumbnail_url || llm.export_render?.thumbnail_url || null;
+        const ctrScore = llm.thumbnail?.ctr_score ?? llm.export_render?.ctr_score ?? null;
+
+        return {
+          ...candidate,
+          session_id: candidate.sessionId,
+          session_title: candidate.session?.title,
+          series_category: candidate.session?.seriesCategory,
+          start_time: candidate.startTime,
+          end_time: candidate.endTime,
+          duration_seconds: candidate.durationSeconds,
+          subtitle_quote: candidate.subtitleQuote,
+          discourse_type: candidate.discourseType,
+          detected_by: candidate.detectedBy,
+          final_ap_score: candidate.finalApScore,
+          is_vetoed: candidate.isVetoed,
+          veto_reason: candidate.vetoReason,
+          ap_score_breakdown: candidate.apScoreBreakdown,
+          llm_analysis: candidate.llmAnalysis,
+          research_references: candidate.researchReferences,
+          created_at: candidate.createdAt,
+          proxy_url: candidate.session?.proxyVideoS3Key ? s3Service.getAssetPublicUrl(candidate.session.proxyVideoS3Key) : null,
+          thumbnail_url: thumbUrl ? s3Service.getAssetPublicUrl(thumbUrl) : null,
+          ctr_score: ctrScore,
+        };
       },
-    });
-
-    if (!candidate) {
-      throw new AppError(`Candidate clip '${id}' not found`, 404);
-    }
-
-    const llm = (candidate.llmAnalysis as any) || {};
-    const thumbUrl = llm.thumbnail?.thumbnail_url || llm.export_render?.thumbnail_url || null;
-    const ctrScore = llm.thumbnail?.ctr_score ?? llm.export_render?.ctr_score ?? null;
-
-    return {
-      ...candidate,
-      session_id: candidate.sessionId,
-      session_title: candidate.session?.title,
-      series_category: candidate.session?.seriesCategory,
-      start_time: candidate.startTime,
-      end_time: candidate.endTime,
-      duration_seconds: candidate.durationSeconds,
-      subtitle_quote: candidate.subtitleQuote,
-      discourse_type: candidate.discourseType,
-      detected_by: candidate.detectedBy,
-      final_ap_score: candidate.finalApScore,
-      is_vetoed: candidate.isVetoed,
-      veto_reason: candidate.vetoReason,
-      ap_score_breakdown: candidate.apScoreBreakdown,
-      llm_analysis: candidate.llmAnalysis,
-      research_references: candidate.researchReferences,
-      created_at: candidate.createdAt,
-      proxy_url: candidate.session?.proxyVideoS3Key ? s3Service.getAssetPublicUrl(candidate.session.proxyVideoS3Key) : null,
-      thumbnail_url: thumbUrl ? s3Service.getAssetPublicUrl(thumbUrl) : null,
-      ctr_score: ctrScore,
-    };
+      30 // 30 seconds cache
+    );
   }
 
   async trimCandidateBounds(id: string, input: TrimCandidateInput) {
@@ -172,30 +194,34 @@ export class CandidatesService {
       },
     });
 
-    // Record trim event in editorial decision log
-    const defaultUser = await prisma.user.findFirst({ select: { id: true } });
-    const resolvedEditorId = defaultUser?.id || "cmu5tb4o700021sugg7so70gg";
-
-    await prisma.editorialDecision.create({
-      data: {
-        candidateId: id,
-        sessionId: candidate.sessionId,
-        editorId: resolvedEditorId,
-        decision: "AMEND",
-        originalStartTime: candidate.startTime,
-        originalEndTime: candidate.endTime,
-        adjustedStartTime: input.startTime,
-        adjustedEndTime: input.endTime,
-        notes: input.reason || "Editor adjusted trim bounds in Review Studio",
-        featureVectorSnapshot: {
-          ap_score: candidate.final_ap_score,
-          discourse_type: candidate.discourse_type,
-          headline: candidate.headline,
-          thumbnail_url: updatedLlmAnalysis.thumbnail?.thumbnail_url || null,
-          ctr_score: updatedLlmAnalysis.thumbnail?.ctr_score || null,
+    // Record trim event in editorial decision log asynchronously
+    prisma.user.findFirst({ select: { id: true } }).then((defaultUser) => {
+      const resolvedEditorId = defaultUser?.id || "cmu5tb4o700021sugg7so70gg";
+      return prisma.editorialDecision.create({
+        data: {
+          candidateId: id,
+          sessionId: candidate.sessionId,
+          editorId: resolvedEditorId,
+          decision: "AMEND",
+          originalStartTime: candidate.startTime,
+          originalEndTime: candidate.endTime,
+          adjustedStartTime: input.startTime,
+          adjustedEndTime: input.endTime,
+          notes: input.reason || "Editor adjusted trim bounds in Review Studio",
+          featureVectorSnapshot: {
+            ap_score: candidate.final_ap_score,
+            discourse_type: candidate.discourse_type,
+            headline: candidate.headline,
+            thumbnail_url: updatedLlmAnalysis.thumbnail?.thumbnail_url || null,
+            ctr_score: updatedLlmAnalysis.thumbnail?.ctr_score || null,
+          },
         },
-      },
-    });
+      });
+    }).catch(() => {});
+
+    // Invalidate caches
+    await cacheService.del(`candidate:${id}`);
+    await cacheService.delByPattern("candidates:list:*");
 
     return updated;
   }
@@ -203,7 +229,6 @@ export class CandidatesService {
   async reAnalyzeCandidate(id: string, input: ReAnalyzeCandidateInput) {
     const candidate = await this.getCandidateById(id);
 
-    // In production, this dispatches a refined prompt to the Python ModelGateway
     return {
       status: "ANALYSIS_UPDATED",
       candidate_id: id,
@@ -216,7 +241,6 @@ export class CandidatesService {
     const candidate = await this.getCandidateById(id);
 
     try {
-      // 1. Trigger automated 9:16 vertical video rendering with face-tracking & subtitles
       const renderRes = await aiServiceClient.renderVerticalClip({
         candidateId: candidate.id,
         sessionId: candidate.sessionId,
@@ -227,7 +251,6 @@ export class CandidatesService {
         aspectRatio: input.aspectRatio || "9:16",
       });
 
-      // 2. Trigger high-CTR thumbnail candidate selection & headline compositing
       const thumbRes = await aiServiceClient.generateThumbnail({
         candidateId: candidate.id,
         sessionId: candidate.sessionId,
@@ -238,7 +261,6 @@ export class CandidatesService {
         channelTag: "आचार्य प्रशांत",
       });
 
-      // 3. Persist rendered URLs inside CandidateClip.llmAnalysis
       const existingAnalysis = (candidate.llmAnalysis as Record<string, any>) || {};
       const updatedAnalysis = {
         ...existingAnalysis,
@@ -260,6 +282,9 @@ export class CandidatesService {
         where: { id },
         data: { llmAnalysis: updatedAnalysis },
       });
+
+      await cacheService.del(`candidate:${id}`);
+      await cacheService.delByPattern("candidates:list:*");
 
       return {
         status: "COMPLETED",
@@ -314,6 +339,9 @@ export class CandidatesService {
         where: { id },
         data: { llmAnalysis: updatedAnalysis },
       });
+
+      await cacheService.del(`candidate:${id}`);
+      await cacheService.delByPattern("candidates:list:*");
 
       return recommendations;
     } catch (err: any) {

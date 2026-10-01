@@ -2,18 +2,28 @@ import { prisma } from "../../infrastructure/db/prisma.js";
 import type { Prisma } from "@prisma/client";
 
 export class SessionsRepository {
+  /**
+   * High-Performance Session List Query
+   * Only includes needed summary counts rather than scanning all 6 internal extraction tables.
+   */
   async listAll(where?: Prisma.VideoSessionWhereInput, limit: number = 50, offset: number = 0) {
     return prisma.videoSession.findMany({
       where,
-      include: {
+      select: {
+        id: true,
+        title: true,
+        description: true,
+        durationSeconds: true,
+        extractionStatus: true,
+        extractionProgress: true,
+        seriesCategory: true,
+        uploadedAt: true,
+        masterVideoS3Key: true,
+        proxyVideoS3Key: true,
         _count: {
           select: {
             candidateClips: true,
-            semanticChunks: true,
-            transcriptSegments: true,
             discoveryRuns: true,
-            keyframes: true,
-            sceneCuts: true,
           },
         },
       },
@@ -30,18 +40,16 @@ export class SessionsRepository {
         mediaAssets: true,
         discoveryRuns: {
           orderBy: { startedAt: "desc" },
-        },
-        candidateClips: {
-          orderBy: { finalApScore: "desc" },
+          take: 5,
         },
         _count: {
           select: {
+            candidateClips: true,
+            discoveryRuns: true,
             semanticChunks: true,
             transcriptSegments: true,
             keyframes: true,
             sceneCuts: true,
-            candidateClips: true,
-            discoveryRuns: true,
           },
         },
       },

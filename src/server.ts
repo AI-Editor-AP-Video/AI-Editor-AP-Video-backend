@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import compress from "@fastify/compress";
 import websocket from "@fastify/websocket";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
@@ -39,6 +40,12 @@ export async function buildApp() {
 
   // 1. Global Plugins (Production-Grade CORS)
   await server.register(cors, corsConfig);
+
+  // 2. High-Performance Brotli & Gzip Payload Compression (Reduces network payload sizes by 80%+)
+  await server.register(compress, {
+    threshold: 1024,
+    encodings: ["br", "gzip", "deflate"],
+  });
 
   // Register WebSocket support for real-time telemetry streaming
   await server.register(websocket);

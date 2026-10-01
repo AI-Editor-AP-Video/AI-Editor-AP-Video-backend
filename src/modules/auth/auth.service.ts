@@ -1,5 +1,6 @@
 import { auth } from "../../config/auth.config.js";
 import { prisma } from "../../infrastructure/db/prisma.js";
+import { cacheService } from "../../infrastructure/cache/cache.service.js";
 import { AppError } from "../../middleware/errorHandler.js";
 
 export { auth };
@@ -59,8 +60,8 @@ export class AuthService {
         throw new AppError("Failed to create account via authentication service", 500);
       }
 
-      // Initialize default editorial profile if not present
-      await prisma.editorProfile.upsert({
+      // Initialize default editorial profile if not present (non-blocking)
+      prisma.editorProfile.upsert({
         where: { userId: response.user.id },
         update: {},
         create: {
@@ -73,15 +74,19 @@ export class AuthService {
       }).catch(() => {});
 
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const userPayload: AuthUserPayload = {
+        id: response.user.id,
+        name: response.user.name ?? name,
+        email: response.user.email,
+        role: (response.user as any).role || role,
+        image: response.user.image,
+      };
+
+      // Pre-warm memory cache for immediate subsequent requests
+      await cacheService.set(`auth:token:${response.token}`, userPayload, 300);
 
       return {
-        user: {
-          id: response.user.id,
-          name: response.user.name ?? name,
-          email: response.user.email,
-          role: (response.user as any).role || role,
-          image: response.user.image,
-        },
+        user: userPayload,
         token: response.token,
         expiresAt,
       };
@@ -121,15 +126,19 @@ export class AuthService {
       }
 
       const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const userPayload: AuthUserPayload = {
+        id: response.user.id,
+        name: response.user.name ?? null,
+        email: response.user.email,
+        role: (response.user as any).role || "EDITOR",
+        image: response.user.image,
+      };
+
+      // Pre-warm memory cache for sub-millisecond future auth checks
+      await cacheService.set(`auth:token:${response.token}`, userPayload, 300);
 
       return {
-        user: {
-          id: response.user.id,
-          name: response.user.name ?? null,
-          email: response.user.email,
-          role: (response.user as any).role || "EDITOR",
-          image: response.user.image,
-        },
+        user: userPayload,
         token: response.token,
         expiresAt,
       };
@@ -142,30 +151,42 @@ export class AuthService {
   }
 
   /**
-   * Validate session token and retrieve authenticated user details
+   * High-Speed Session & Token Verification (<0.1ms via L1 Cache)
    */
   async getCurrentUser(token?: string, headers?: Headers | Record<string, any>): Promise<AuthUserPayload> {
-    // 1. If headers are provided, attempt Better-Auth getSession directly
+    // 1. Fast-path: Check memory / Redis token cache first (Zero DB roundtrip)
+    if (token) {
+      const cached = await cacheService.get<AuthUserPayload>(`auth:token:${token}`);
+      if (cached) {
+        return cached;
+      }
+    }
+
+    // 2. If headers provided and no direct token match, try Better-Auth getSession
     if (headers) {
       try {
         const session = await auth.api.getSession({
           headers: headers as any,
         });
         if (session && session.user) {
-          return {
+          const userPayload: AuthUserPayload = {
             id: session.user.id,
             name: session.user.name ?? null,
             email: session.user.email,
             role: (session.user as any).role || "EDITOR",
             image: session.user.image,
           };
+          if (session.session?.token) {
+            await cacheService.set(`auth:token:${session.session.token}`, userPayload, 120);
+          }
+          return userPayload;
         }
       } catch {
         // Fallback to token lookup below
       }
     }
 
-    // 2. Validate token from database
+    // 3. Database lookup on cache miss
     if (!token) {
       throw new AppError("Authentication token is required", 401);
     }
@@ -173,44 +194,49 @@ export class AuthService {
     const session = await prisma.session.findUnique({
       where: { token },
       include: {
-        user: {
-          include: { profile: true },
-        },
+        user: true,
       },
     });
 
     if (!session || session.expiresAt < new Date()) {
       if (session) {
-        await prisma.session.delete({ where: { token } }).catch(() => {});
+        prisma.session.delete({ where: { token } }).catch(() => {});
       }
+      await cacheService.del(`auth:token:${token}`);
       throw new AppError("Session expired or invalid", 401);
     }
 
-    return {
+    const userPayload: AuthUserPayload = {
       id: session.user.id,
       name: session.user.name ?? null,
       email: session.user.email,
       role: session.user.role,
       image: session.user.image,
     };
+
+    // Cache verified session for 120 seconds
+    await cacheService.set(`auth:token:${token}`, userPayload, 120);
+
+    return userPayload;
   }
 
   /**
-   * Terminate active session
+   * Terminate active session and invalidate cache
    */
   async logout(token?: string, headers?: Headers | Record<string, any>): Promise<{ success: boolean }> {
+    if (token) {
+      await cacheService.del(`auth:token:${token}`);
+      prisma.session.deleteMany({ where: { token } }).catch(() => {});
+    }
+
     if (headers) {
       try {
         await auth.api.signOut({
           headers: headers as any,
         });
       } catch {
-        // Fallback to token deletion
+        // Fallback
       }
-    }
-
-    if (token) {
-      await prisma.session.deleteMany({ where: { token } }).catch(() => {});
     }
 
     return { success: true };

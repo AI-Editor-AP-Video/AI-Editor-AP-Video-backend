@@ -48,6 +48,7 @@ model Session {
   updatedAt DateTime @default(now()) @updatedAt
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId, expiresAt])
   @@map("auth_sessions")
 }
 
@@ -67,6 +68,7 @@ model Account {
   updatedAt             DateTime  @default(now()) @updatedAt
   user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@index([userId, providerId])
   @@map("accounts")
 }
 
@@ -133,6 +135,7 @@ model VideoSession {
   discoveryRuns  DiscoveryRun[]
   candidateClips CandidateClip[]
 
+  @@index([uploadedAt, extractionStatus])
   @@map("sessions")
 }
 
@@ -148,6 +151,7 @@ model MediaAsset {
   createdAt      DateTime     @default(now())
   session        VideoSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
+  @@index([sessionId])
   @@map("media_assets")
 }
 
@@ -241,6 +245,7 @@ model DiscoveryRun {
   session         VideoSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   candidates      CandidateClip[]
 
+  @@index([sessionId, status, completedAt])
   @@map("discovery_runs")
 }
 
@@ -286,6 +291,8 @@ model CandidateClip {
   discoveryRun DiscoveryRun?       @relation(fields: [discoveryRunId], references: [id], onDelete: SetNull)
   decisions    EditorialDecision[]
 
+  @@index([sessionId, discoveryRunId, finalApScore])
+  @@index([discoveryRunId, status])
   @@index([sessionId, finalApScore])
   @@map("candidate_clips")
 }
@@ -317,6 +324,7 @@ model EditorialDecision {
   candidate CandidateClip @relation(fields: [candidateId], references: [id], onDelete: Cascade)
   editor    User?         @relation(fields: [editorId], references: [id], onDelete: SetNull)
 
+  @@index([candidateId])
   @@index([sessionId, decision])
   @@map("editorial_decisions")
 }
