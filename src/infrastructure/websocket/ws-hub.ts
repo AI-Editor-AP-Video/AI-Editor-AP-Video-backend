@@ -52,6 +52,21 @@ export class WebSocketHub {
       });
 
       this.redisSubscriber.psubscribe("session:*:progress", "session:*:discovery", "session:*");
+
+      // Keepalive heartbeat to prevent cloud/browser idle timeouts
+      setInterval(() => {
+        for (const [sessionId, clientSet] of this.connections.entries()) {
+          for (const client of clientSet) {
+            if (client.readyState === 1) { // OPEN
+              try {
+                client.ping();
+              } catch {
+                // ignore ping error
+              }
+            }
+          }
+        }
+      }, 15000);
     } catch (err) {
       console.warn("Redis pub/sub initialization skipped:", err);
     }
@@ -67,10 +82,10 @@ export class WebSocketHub {
       this.removeConnection(sessionId, socket);
     });
 
-    // Replay full log history from Redis to the new connection
+    // Replay recent log history from Redis to the new connection (capped at last 200 events)
     try {
       if (this.redisClient) {
-        const storedLogs = await this.redisClient.lrange(`session:${sessionId}:logs`, 0, -1);
+        const storedLogs = await this.redisClient.lrange(`session:${sessionId}:logs`, -200, -1);
         for (const logStr of storedLogs) {
           if (socket.readyState === 1) {
             socket.send(logStr);
@@ -82,12 +97,33 @@ export class WebSocketHub {
     }
   }
 
+  /**
+   * Set TTL on all ephemeral Redis keys for a session so memory is automatically reclaimed.
+   */
+  async expireSessionKeys(sessionId: string, ttlSeconds: number = 7200) {
+    try {
+      if (this.redisClient) {
+        const pipeline = this.redisClient.pipeline();
+        pipeline.expire(`session:${sessionId}:logs`, ttlSeconds);
+        pipeline.expire(`session:${sessionId}:discovery_logs`, ttlSeconds);
+        pipeline.expire(`session:${sessionId}:discovery_state`, ttlSeconds);
+        pipeline.expire(`session:${sessionId}:state`, ttlSeconds);
+        await pipeline.exec();
+      }
+    } catch (err) {
+      console.warn("Failed to set expiry on session keys in Redis:", err);
+    }
+  }
+
   async clearSessionLogs(sessionId: string) {
     try {
       if (this.redisClient) {
-        await this.redisClient.del(`session:${sessionId}:logs`);
-        await this.redisClient.del(`session:${sessionId}:discovery_logs`);
-        await this.redisClient.del(`session:${sessionId}:discovery_state`);
+        const pipeline = this.redisClient.pipeline();
+        pipeline.del(`session:${sessionId}:logs`);
+        pipeline.del(`session:${sessionId}:discovery_logs`);
+        pipeline.del(`session:${sessionId}:discovery_state`);
+        pipeline.del(`session:${sessionId}:state`);
+        await pipeline.exec();
       }
     } catch (err) {
       console.warn("Failed to clear session logs in Redis:", err);

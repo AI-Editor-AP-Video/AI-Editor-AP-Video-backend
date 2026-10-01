@@ -184,6 +184,40 @@ export class AIServiceClient {
     }
     return res.json();
   }
+
+  /**
+   * Phase 3: Trigger Timeline-Aware Editorial Recommendations & Empirical Research Augmentation
+   */
+  async getTimelineRecommendations(params: {
+    candidateId: string;
+    sessionId: string;
+    startTime: number;
+    endTime: number;
+    headline: string;
+    discourseType?: string;
+    topics?: string[];
+    transcriptText?: string;
+  }): Promise<any> {
+    const res = await fetch(`${this.baseUrl}/api/ai/candidates/timeline-recommendations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        candidate_id: params.candidateId,
+        session_id: params.sessionId,
+        start_time: params.startTime,
+        end_time: params.endTime,
+        headline: params.headline,
+        discourse_type: params.discourseType || "Philosophical_Argument",
+        topics: params.topics || [],
+        transcript_text: params.transcriptText,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`AI timeline recommendations failed: ${err}`);
+    }
+    return res.json();
+  }
 }
 
 export const aiServiceClient = new AIServiceClient();

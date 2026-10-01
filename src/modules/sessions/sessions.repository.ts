@@ -59,6 +59,12 @@ export class SessionsRepository {
     });
   }
 
+  async delete(id: string) {
+    return prisma.videoSession.delete({
+      where: { id },
+    });
+  }
+
   async getTranscriptSegments(sessionId: string) {
     return prisma.transcriptSegment.findMany({
       where: { sessionId },

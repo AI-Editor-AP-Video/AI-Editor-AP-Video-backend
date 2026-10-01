@@ -1,6 +1,7 @@
 import { prisma } from "../../infrastructure/db/prisma.js";
 import { AppError } from "../../middleware/errorHandler.js";
 import { aiServiceClient } from "../../infrastructure/ai-client/ai-service-client.js";
+import { s3Service } from "../../infrastructure/storage/s3.js";
 import type {
   ListCandidatesQuery,
   TrimCandidateInput,
@@ -74,7 +75,7 @@ export class CandidatesService {
         research_references: c.researchReferences,
         status: c.status,
         created_at: c.createdAt,
-        thumbnail_url: thumbUrl,
+        thumbnail_url: thumbUrl ? s3Service.getAssetPublicUrl(thumbUrl) : null,
         ctr_score: ctrScore,
       };
     });
@@ -118,8 +119,8 @@ export class CandidatesService {
       llm_analysis: candidate.llmAnalysis,
       research_references: candidate.researchReferences,
       created_at: candidate.createdAt,
-      proxy_url: candidate.session?.proxyVideoS3Key,
-      thumbnail_url: thumbUrl,
+      proxy_url: candidate.session?.proxyVideoS3Key ? s3Service.getAssetPublicUrl(candidate.session.proxyVideoS3Key) : null,
+      thumbnail_url: thumbUrl ? s3Service.getAssetPublicUrl(thumbUrl) : null,
       ctr_score: ctrScore,
     };
   }
@@ -281,6 +282,43 @@ export class CandidatesService {
         message: `Render job queued. Error details: ${err.message || err}`,
         output_filename: `AP_${candidate.discourseType}_${candidate.id}_${input.format}.mp4`,
       };
+    }
+  }
+
+  async getTimelineRecommendations(id: string) {
+    const candidate = await this.getCandidateById(id);
+    const existingAnalysis = (candidate.llmAnalysis as Record<string, any>) || {};
+
+    if (existingAnalysis.timeline_recommendations && existingAnalysis.timeline_recommendations.cue_points?.length > 0) {
+      return existingAnalysis.timeline_recommendations;
+    }
+
+    try {
+      const recommendations = await aiServiceClient.getTimelineRecommendations({
+        candidateId: candidate.id,
+        sessionId: candidate.sessionId,
+        startTime: candidate.startTime,
+        endTime: candidate.endTime,
+        headline: candidate.headline,
+        discourseType: candidate.discourseType,
+        topics: Array.isArray(candidate.topics) ? (candidate.topics as string[]) : [],
+        transcriptText: candidate.subtitleQuote || undefined,
+      });
+
+      const updatedAnalysis = {
+        ...existingAnalysis,
+        timeline_recommendations: recommendations,
+      };
+
+      await prisma.candidateClip.update({
+        where: { id },
+        data: { llmAnalysis: updatedAnalysis },
+      });
+
+      return recommendations;
+    } catch (err: any) {
+      console.error(`Timeline recommendations failed for candidate ${id}:`, err);
+      throw new AppError(`Failed to generate timeline recommendations: ${err.message || err}`, 500);
     }
   }
 }

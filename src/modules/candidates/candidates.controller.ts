@@ -53,4 +53,10 @@ export async function candidatesRoutes(fastify: FastifyInstance) {
       return candidatesService.exportClip(id, req.body as any);
     }
   );
+
+  // Phase 3: Get or generate timeline augmentation recommendations
+  fastify.post("/api/candidates/:id/timeline-recommendations", async (req) => {
+    const { id } = req.params as { id: string };
+    return candidatesService.getTimelineRecommendations(id);
+  });
 }

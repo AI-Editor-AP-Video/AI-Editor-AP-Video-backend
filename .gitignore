@@ -27,7 +27,7 @@ uploads/exports/*
 # Environment & Secrets
 .env
 .env.*
-!.env.example
+.env.example
 
 # Logs
 npm-debug.log*

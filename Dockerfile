@@ -22,7 +22,10 @@ FROM node:20-alpine AS runner
 
 WORKDIR /app
 ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=1536"
 
+# Install dumb-init for clean process and signal management (graceful shutdowns)
+RUN apk add --no-cache dumb-init wget
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 COPY package.json pnpm-lock.yaml ./
@@ -35,4 +38,8 @@ COPY prisma ./prisma
 
 EXPOSE 4000
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://localhost:4000/api/health || exit 1
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["node", "dist/server.js"]

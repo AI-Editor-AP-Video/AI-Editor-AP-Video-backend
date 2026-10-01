@@ -101,4 +101,10 @@ export async function sessionsRoutes(fastify: FastifyInstance) {
     const body = req.body as { title?: string; description?: string; seriesCategory?: string };
     return sessionsService.updateSession(id, body);
   });
+
+  // Delete session and permanently purge all media files, proxies, keyframes, transcripts, and database records
+  fastify.delete("/api/sessions/:id", async (req) => {
+    const { id } = req.params as { id: string };
+    return sessionsService.deleteSession(id);
+  });
 }

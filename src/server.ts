@@ -18,16 +18,18 @@ import { candidatesRoutes } from "./modules/candidates/candidates.controller.js"
 import { rubricRoutes } from "./modules/rubric/rubric.controller.js";
 import { decisionsRoutes } from "./modules/decisions/decisions.controller.js";
 import { searchRoutes } from "./modules/search/search.controller.js";
+import { mediaRoutes } from "./modules/media/media.controller.js";
 
 export async function buildApp() {
   const server = Fastify({
-    logger: env.NODE_ENV === "development" ? { level: "info" } : { level: "warn" },
+    logger: {
+      level: env.NODE_ENV === "production" ? "info" : "debug",
+    },
+    bodyLimit: 10 * 1024 * 1024 * 1024,
   });
 
-  // Ensure uploads directory exists (use /tmp/uploads on Vercel Serverless)
-  const uploadsDir = process.env.VERCEL
-    ? path.join("/tmp", "uploads")
-    : path.resolve(process.cwd(), "uploads");
+  // Ensure uploads directory exists
+  const uploadsDir = path.resolve(process.cwd(), "uploads");
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
@@ -46,7 +48,8 @@ export async function buildApp() {
       if (
         allowed.includes(origin) ||
         origin.endsWith(".vercel.app") ||
-        origin.endsWith(".pages.dev")
+        origin.endsWith(".pages.dev") ||
+        origin.endsWith(".vikashkr.online")
       ) {
         return cb(null, true);
       }
@@ -56,10 +59,8 @@ export async function buildApp() {
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
 
-  // Register WebSocket support only in persistent server mode
-  if (!process.env.VERCEL) {
-    await server.register(websocket);
-  }
+  // Register WebSocket support for real-time telemetry streaming
+  await server.register(websocket);
 
   await server.register(multipart, {
     limits: {
@@ -94,20 +95,19 @@ export async function buildApp() {
   await server.register(rubricRoutes);
   await server.register(decisionsRoutes);
   await server.register(searchRoutes);
+  await server.register(mediaRoutes);
 
   // 4. Real-time WebSocket Telemetry Route
-  if (!process.env.VERCEL) {
-    server.get("/ws/sessions/:id", { websocket: true }, (socket, req) => {
-      const { id: sessionId } = req.params as { id: string };
-      server.log.info(`WebSocket telemetry subscriber connected for session: ${sessionId}`);
+  server.get("/ws/sessions/:id", { websocket: true }, (socket, req) => {
+    const { id: sessionId } = req.params as { id: string };
+    server.log.info(`WebSocket telemetry subscriber connected for session: ${sessionId}`);
 
-      wsHub.registerConnection(sessionId, socket);
+    wsHub.registerConnection(sessionId, socket);
 
-      socket.on("close", () => {
-        server.log.info(`WebSocket telemetry subscriber disconnected for session: ${sessionId}`);
-      });
+    socket.on("close", () => {
+      server.log.info(`WebSocket telemetry subscriber disconnected for session: ${sessionId}`);
     });
-  }
+  });
 
   // 5. Internal AI Microservice Webhook Callback
   server.post("/api/internal/ai-callback", async (req, reply) => {
@@ -121,13 +121,36 @@ export async function buildApp() {
 
     server.log.info({ payload }, "Received internal callback from Python AI engine");
 
-    // Broadcast to connected WebSocket clients if in persistent mode
-    if (!process.env.VERCEL) {
-      wsHub.broadcastToSession(payload.session_id, {
-        type: "AI_CALLBACK",
-        ...payload,
-        timestamp: new Date().toISOString(),
-      });
+    // Broadcast to connected WebSocket clients
+    wsHub.broadcastToSession(payload.session_id, {
+      type: "AI_CALLBACK",
+      ...payload,
+      timestamp: new Date().toISOString(),
+    });
+
+    // When Phase 1 extraction completes and assets are uploaded to R2, clean up staging files
+    if (payload.step === "EXTRACTION" && payload.status === "COMPLETED") {
+      try {
+        if (fs.existsSync(uploadsDir)) {
+          const files = fs.readdirSync(uploadsDir);
+          for (const file of files) {
+            if (file.startsWith(`${payload.session_id}_`) || file === payload.session_id) {
+              const p = path.join(uploadsDir, file);
+              fs.rmSync(p, { recursive: true, force: true });
+              server.log.info(`[Uploads Cleanup] Purged local staging asset: ${file}`);
+            }
+          }
+        }
+      } catch (err) {
+        server.log.warn({ err }, "[Uploads Cleanup] Warning during staging files cleanup");
+      }
+
+      // Schedule Redis ephemeral logs cleanup (expire in 2 hours since everything is indexed in DB)
+      try {
+        await wsHub.expireSessionKeys(payload.session_id, 7200);
+      } catch (err) {
+        server.log.warn({ err }, "[Redis Cleanup] Warning scheduling Redis logs expiration");
+      }
     }
 
     return { received: true };
@@ -157,14 +180,12 @@ export async function buildApp() {
   return server;
 }
 
-// 7. Start Standalone HTTP Server (Localhost, Docker, Cloud Run)
-if (!process.env.VERCEL) {
-  try {
-    const server = await buildApp();
-    await server.listen({ port: env.PORT, host: env.HOST });
-    console.log(`🚀 Production-grade AP Editorial Backend live on http://localhost:${env.PORT}`);
-  } catch (err) {
-    console.error(err);
-    process.exit(1);
-  }
+// 7. Start Standalone HTTP Server (Localhost, Docker, EC2)
+try {
+  const server = await buildApp();
+  await server.listen({ port: env.PORT, host: "0.0.0.0" });
+  console.log(`🚀 Production-grade AP Editorial Backend live on http://localhost:${env.PORT}`);
+} catch (err) {
+  console.error(err);
+  process.exit(1);
 }
