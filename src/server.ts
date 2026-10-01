@@ -6,6 +6,7 @@ import fastifyStatic from "@fastify/static";
 import path from "node:path";
 import fs from "node:fs";
 import { env } from "./config/env.js";
+import { corsConfig } from "./config/cors.config.js";
 import { globalErrorHandler } from "./middleware/errorHandler.js";
 import { wsHub } from "./infrastructure/websocket/ws-hub.js";
 
@@ -34,30 +35,8 @@ export async function buildApp() {
     fs.mkdirSync(uploadsDir, { recursive: true });
   }
 
-  // 1. Global Plugins
-  await server.register(cors, {
-    origin: (origin, cb) => {
-      if (!origin || env.NODE_ENV === "development") {
-        return cb(null, true);
-      }
-      const allowed = [
-        env.FRONTEND_URL,
-        "http://localhost:3000",
-        "http://localhost:3001",
-      ];
-      if (
-        allowed.includes(origin) ||
-        origin.endsWith(".vercel.app") ||
-        origin.endsWith(".pages.dev") ||
-        origin.endsWith(".vikashkr.online")
-      ) {
-        return cb(null, true);
-      }
-      return cb(null, true);
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  });
+  // 1. Global Plugins (Production-Grade CORS)
+  await server.register(cors, corsConfig);
 
   // Register WebSocket support for real-time telemetry streaming
   await server.register(websocket);
@@ -181,11 +160,23 @@ export async function buildApp() {
 }
 
 // 7. Start Standalone HTTP Server (Localhost, Docker, EC2)
-try {
-  const server = await buildApp();
-  await server.listen({ port: env.PORT, host: "0.0.0.0" });
-  console.log(`🚀 Production-grade AP Editorial Backend live on http://localhost:${env.PORT}`);
-} catch (err) {
-  console.error(err);
-  process.exit(1);
+if (process.env.NODE_ENV !== "test") {
+  try {
+    const server = await buildApp();
+    await server.listen({ port: env.PORT, host: "0.0.0.0" });
+    console.log(`🚀 Production-grade AP Editorial Backend live on http://0.0.0.0:${env.PORT}`);
+
+    const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
+    for (const signal of signals) {
+      process.on(signal, async () => {
+        server.log.info(`Received ${signal}, closing server gracefully...`);
+        await server.close();
+        process.exit(0);
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    process.exit(1);
+  }
 }
+

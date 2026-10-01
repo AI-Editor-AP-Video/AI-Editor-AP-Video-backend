@@ -14,18 +14,17 @@ declare module "fastify" {
   }
 }
 
-export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
+export async function requireAuth(req: FastifyRequest, _reply: FastifyReply) {
   const authHeader = req.headers.authorization;
   const token = authHeader?.replace(/^Bearer\s+/i, "") || (req.query as any)?.token;
 
-  if (!token) {
-    throw new AppError("Authentication required. Please provide a valid Bearer token.", 401);
-  }
-
   try {
-    const user = await authService.getCurrentUser(token);
+    const user = await authService.getCurrentUser(token, req.headers);
     req.authUser = user;
   } catch (err: any) {
-    throw new AppError("Invalid or expired session. Please sign in again.", 401);
+    throw new AppError(
+      err.message || "Authentication required. Please sign in with a valid session.",
+      401
+    );
   }
 }
